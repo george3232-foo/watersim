@@ -111,7 +111,7 @@ body.photo #scene{cursor:default}
   .throwables{gap:4px}
   .throwable{width:34px;height:34px}
   #right-stack{right:18px;top:20px}
-  #hint{bottom:130px;font-size:8px}
+  #hint{display:none}
   .help-grid{grid-template-columns:1fr}
   .modal-card{padding:28px 24px}
 }

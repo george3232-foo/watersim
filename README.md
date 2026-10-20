@@ -8,6 +8,8 @@ Throw pebbles, stones, apples, a rubber duck, a beach ball or a leaf into the wa
 finger (or the mouse) through the surface to stir it. Sprinkle food and watch the koi rise,
 nibble — and scatter when something hits the pond.
 
+**Live demo:** https://george3232-foo.github.io/watersim/
+
 ## Run
 
 ```bash
