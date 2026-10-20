@@ -104,7 +104,6 @@ body.photo #scene{cursor:default}
   #brand{top:22px;left:22px}
   .brand-mark{font-size:18px}
   #conditions{left:16px;bottom:104px;width:236px}
-  #conditions.collapsed{display:none}
   #toolbar{bottom:18px;width:calc(100% - 24px)}
   .mode{padding:8px 11px;font-size:9px}
   .mode span{display:none}
