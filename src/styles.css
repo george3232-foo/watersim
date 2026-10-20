@@ -100,7 +100,7 @@ body.photo #scene{cursor:default}
 #charge-ring{position:absolute;z-index:9;pointer-events:none;width:70px;height:70px;margin:-35px 0 0 -35px;border-radius:50%;opacity:0;transition:opacity .15s}
 #charge-ring.visible{opacity:1}
 
-@media (max-width:820px){
+@media (max-width:1024px){
   #brand{top:22px;left:22px}
   .brand-mark{font-size:18px}
   #conditions{left:16px;bottom:104px;width:236px}
