@@ -1,0 +1,13 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch({ headless: true, args: ['--use-gl=angle','--use-angle=gl','--ignore-gpu-blocklist','--enable-gpu','--disable-gpu-sandbox'] });
+const page = await browser.newPage({ viewport: { width: 1152, height: 720 } });
+await page.goto('http://localhost:5173/?quality=low', { waitUntil: 'domcontentloaded' });
+await page.waitForFunction(() => window.__pond && window.__pond.ready, null, { timeout: 60000 });
+await page.waitForTimeout(2500);
+await page.evaluate(() => { const a = window.__pond; a.water.update = () => {}; a.water.uniforms.uSunIntensity.value = 0; });
+await page.waitForTimeout(700);
+await page.screenshot({ path: '/tmp/dbg-nosun.png' });
+await page.evaluate(() => { const a = window.__pond; a.water.uniforms.uSunIntensity.value = 1.9; });
+await page.waitForTimeout(500);
+await page.screenshot({ path: '/tmp/dbg-sun.png' });
+await browser.close();

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0f0d" />
+  <title>Stillwater — a living pond</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="scene" aria-label="Interactive pond"></canvas>
+
+    <div id="loading">
+      <div class="load-inner">
+        <div class="load-mark">STILLWATER</div>
+        <div class="load-sub">a living pond</div>
+        <div class="load-bar"><span></span></div>
+        <div class="load-status">filling the pond…</div>
+      </div>
+    </div>
+
+    <header id="brand">
+      <div class="brand-mark">STILLWATER</div>
+      <div class="brand-sub">a living pond</div>
+    </header>
+
+    <div id="conditions" class="glass">
+      <div class="panel-head">
+        <span class="eyebrow">conditions</span>
+        <button id="conditions-toggle" class="icon-btn" title="Collapse">−</button>
+      </div>
+      <div class="panel-body">
+        <label class="slider-row">
+          <span>Time</span>
+          <input id="time-slider" type="range" min="6" max="23.5" step="0.05" value="18.8" />
+          <output id="time-out">18:48</output>
+        </label>
+        <label class="slider-row">
+          <span>Wind</span>
+          <input id="wind-slider" type="range" min="0" max="1" step="0.01" value="0.4" />
+          <output id="wind-out">40%</output>
+        </label>
+        <label class="slider-row">
+          <span>Rain</span>
+          <input id="rain-slider" type="range" min="0" max="1" step="0.01" value="0" />
+          <output id="rain-out">0%</output>
+        </label>
+        <div class="preset-row">
+          <button class="chip" data-preset="golden">golden</button>
+          <button class="chip" data-preset="dawn">dawn</button>
+          <button class="chip" data-preset="overcast">overcast</button>
+          <button class="chip" data-preset="rain">rain</button>
+          <button class="chip" data-preset="night">night</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toolbar">
+      <div class="modes">
+        <button class="mode active" data-mode="throw">
+          <svg viewBox="0 0 24 24"><path d="M5 19 L19 5 M8 5h11v11"/></svg>
+          <span>Throw</span>
+        </button>
+        <button class="mode" data-mode="touch">
+          <svg viewBox="0 0 24 24"><path d="M8 12V6a2 2 0 1 1 4 0v5m0-3a2 2 0 1 1 4 0v4m0-2a2 2 0 1 1 4 0v5c0 4-2 6-6 6h-2c-2 0-3-1-4-3l-3-4a2 2 0 0 1 3-2l2 2"/></svg>
+          <span>Touch</span>
+        </button>
+        <button class="mode" data-mode="feed">
+          <svg viewBox="0 0 24 24"><circle cx="7" cy="9" r="1.4"/><circle cx="12" cy="6" r="1.2"/><circle cx="16" cy="10" r="1.6"/><circle cx="10" cy="14" r="1.3"/><circle cx="15" cy="16" r="1.1"/></svg>
+          <span>Feed</span>
+        </button>
+      </div>
+      <div id="throwables" class="throwables">
+        <button class="throwable active" data-object="pebble" title="Pebble">●<span>pebble</span></button>
+        <button class="throwable" data-object="stone" title="Stone">⬤<span>stone</span></button>
+        <button class="throwable" data-object="apple" title="Apple">🍎<span>apple</span></button>
+        <button class="throwable" data-object="duck" title="Rubber duck">🦆<span>duck</span></button>
+        <button class="throwable" data-object="ball" title="Beach ball">◍<span>ball</span></button>
+        <button class="throwable" data-object="leaf" title="Leaf">🍂<span>leaf</span></button>
+      </div>
+    </div>
+
+    <div id="right-stack">
+      <button id="sound-btn" class="round-btn" title="Sound (M)">◒</button>
+      <button id="help-btn" class="round-btn" title="Help (H)">?</button>
+      <div id="stats">
+        <div><span id="fps">60</span> fps</div>
+        <div id="simstat">sim 256² · 512²</div>
+      </div>
+    </div>
+
+    <div id="hint">hold to throw · right-drag to orbit · scroll to zoom</div>
+    <div id="toast"></div>
+
+    <div id="help" class="modal hidden">
+      <div class="modal-card glass">
+        <button id="help-close" class="icon-btn">×</button>
+        <div class="eyebrow">stillwater</div>
+        <h1>A living pond</h1>
+        <p>Every ring is simulated, not animated. The surface is solved on the GPU as a volume-conserving
+        shallow-water field, with a second dispersive ripple layer for the small waves a pond actually makes.</p>
+        <div class="help-grid">
+          <div><b>Throw</b><span>hold to charge, release to throw. aim with the cursor.</span></div>
+          <div><b>Touch</b><span>drag through the water. push it, swirl it, lift your hand.</span></div>
+          <div><b>Feed</b><span>scatter food. the koi will come, and the ripples are real.</span></div>
+          <div><b>Orbit</b><span>right-drag (or two fingers) to orbit. scroll to zoom.</span></div>
+        </div>
+        <p class="fine">Floating objects displace real volume and read the simulated surface back from the GPU.
+        Fish flee the same disturbance events that move the water. Two-way coupling, all the way down.</p>
+        <div class="help-keys"><kbd>1</kbd> throw <kbd>2</kbd> touch <kbd>3</kbd> feed <kbd>R</kbd> rain <kbd>M</kbd> mute <kbd>P</kbd> photo <kbd>H</kbd> help</div>
+      </div>
+    </div>
+
+    <button id="photo-exit" class="hidden">exit photo mode</button>
+  </div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

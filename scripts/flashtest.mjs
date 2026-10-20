@@ -1,0 +1,26 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch({ headless: true, args: ['--use-gl=angle','--use-angle=gl','--ignore-gpu-blocklist','--enable-gpu','--disable-gpu-sandbox'] });
+const page = await browser.newPage({ viewport: { width: 1152, height: 720 } });
+const errs = [];
+page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') errs.push(m.text().slice(0, 400)); });
+page.on('pageerror', e => errs.push('PE ' + e.message));
+await page.goto('http://localhost:5173/?quality=low', { waitUntil: 'domcontentloaded' });
+await page.waitForFunction(() => window.__pond && window.__pond.ready, null, { timeout: 60000 });
+await page.waitForTimeout(1200);
+await page.evaluate(() => document.querySelector('.chip[data-preset="rain"]')?.click());
+await page.waitForTimeout(2500);
+await page.evaluate(() => {
+	const a = window.__pond;
+	a.sky.flashPeak = 1.0;
+	a.sky.flash = 1.0;
+	a.sky.flashAge = 0;
+	const p = a.sky.spawnBoltAhead(a.camera);
+	a.sky.flashLight.position.set(p.x, 26, p.z);
+});
+await page.waitForTimeout(60);
+await page.screenshot({ path: '/tmp/storm-flash1.png' });
+await page.waitForTimeout(100);
+await page.screenshot({ path: '/tmp/storm-flash2.png' });
+const flash = await page.evaluate(() => ({ flash: window.__pond.sky.flash, u: window.__pond.sky.uniforms.uFlash.value, light: window.__pond.sky.flashLight.intensity }));
+console.log(flash, errs.slice(0, 10));
+await browser.close();
