@@ -34,7 +34,10 @@ button:focus-visible{outline:1px solid var(--accent);outline-offset:3px}
 
 #conditions{position:absolute;left:38px;bottom:38px;width:268px;border-radius:14px;z-index:12;overflow:hidden;transition:transform .5s cubic-bezier(.4,0,.2,1),opacity .4s}
 #conditions.collapsed .panel-body{display:none}
-#conditions.collapsed{width:200px}
+#conditions.collapsed{width:46px;height:46px;border-radius:50%}
+#conditions.collapsed .panel-head{padding:0;height:100%}
+#conditions.collapsed .eyebrow{display:none}
+#conditions.collapsed .icon-btn{width:46px;height:46px;font-size:18px}
 .panel-head{display:flex;align-items:center;justify-content:space-between;padding:13px 16px 9px}
 .eyebrow{font-size:9px;letter-spacing:.28em;text-transform:uppercase;color:var(--ink-dim)}
 .icon-btn{width:24px;height:24px;border-radius:50%;color:var(--ink-dim);font-size:15px;line-height:1;display:grid;place-items:center;transition:.2s}

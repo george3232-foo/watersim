@@ -89,7 +89,7 @@ if (app) {
 
 	document.getElementById('conditions-toggle').addEventListener('click', (e) => {
 		const collapsed = document.getElementById('conditions').classList.toggle('collapsed');
-		e.currentTarget.textContent = collapsed ? '+' : '−';
+		e.currentTarget.textContent = collapsed ? '⚙' : '−';
 		e.currentTarget.title = collapsed ? 'Expand' : 'Collapse';
 	});
 	document.getElementById('help-btn').addEventListener('click', () => {
