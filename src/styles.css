@@ -21,8 +21,8 @@ button:focus-visible{outline:1px solid var(--accent);outline-offset:3px}
 
 #loading{position:absolute;inset:0;z-index:50;background:#070b09;display:grid;place-items:center;transition:opacity 1.4s cubic-bezier(.4,0,.2,1)}
 #loading.done{opacity:0;pointer-events:none}
-.load-inner{text-align:center;width:min(420px,70vw)}
-.load-mark{font-family:var(--serif);font-size:clamp(34px,5vw,54px);letter-spacing:.42em;font-weight:400;text-indent:.42em}
+.load-inner{text-align:center;width:min(720px,calc(100vw - 24px))}
+.load-mark{font-family:var(--serif);font-size:clamp(20px,7.2vw,54px);letter-spacing:.42em;font-weight:400;white-space:nowrap}
 .load-sub{font-family:var(--serif);font-style:italic;color:var(--ink-dim);font-size:17px;letter-spacing:.08em;margin-top:6px}
 .load-bar{height:1px;background:rgba(255,255,255,.1);margin:38px auto 14px;width:180px;overflow:hidden}
 .load-bar span{display:block;height:100%;width:0;background:var(--accent);transition:width .6s ease}
