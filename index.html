@@ -53,6 +53,15 @@
           <button class="chip" data-preset="rain">rain</button>
           <button class="chip" data-preset="night">night</button>
         </div>
+        <label class="quality-row">
+          <span>Quality</span>
+          <select id="quality-select" aria-label="Rendering quality">
+            <option value="auto">auto</option>
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+          </select>
+        </label>
       </div>
     </div>
 
@@ -82,7 +91,7 @@
     </div>
 
     <div id="right-stack">
-      <button id="sound-btn" class="round-btn" title="Sound (M)">◒</button>
+      <button id="sound-btn" class="round-btn" title="Mute sound (M)" aria-label="Mute sound" aria-pressed="false">◒</button>
       <button id="help-btn" class="round-btn" title="Help (H)">?</button>
       <div id="stats">
         <div><span id="fps">60</span> fps</div>
@@ -90,7 +99,7 @@
       </div>
     </div>
 
-    <div id="hint">hold to throw · right-drag to orbit · scroll to zoom</div>
+    <div id="hint">hold to charge · release to throw · right-drag to orbit</div>
     <div id="toast"></div>
 
     <div id="help" class="modal hidden">
@@ -112,7 +121,7 @@
       </div>
     </div>
 
-    <button id="photo-exit" class="hidden">exit photo mode</button>
+    <button id="photo-exit" class="hidden" aria-label="Exit photo mode">exit photo mode</button>
   </div>
   <script type="module" src="/src/main.js"></script>
 </body>

@@ -6,11 +6,12 @@ const TERRAIN_ANGULAR = 320;
 const TERRAIN_RADIAL = 84;
 
 export class Terrain {
-	constructor(heightField, bedTexture, domain) {
+	constructor(heightField, bedTexture, domain = 20) {
 		this.hf = heightField;
 		this.bedTexture = bedTexture;
 		this.domain = domain;
 		this.half = domain * 0.5;
+		this.simulationSize = 256;
 		this.radius = TERRAIN_RADIUS;
 		this.uniforms = {
 			uTime: { value: 0 },
@@ -20,6 +21,7 @@ export class Terrain {
 			uDomain: { value: domain },
 			uHalf: { value: domain * 0.5 },
 			uWaterLevel: { value: 0 },
+			uSimulationTexel: { value: new THREE.Vector2(1 / 256, 1 / 256) },
 			uSunColor: { value: new THREE.Color(0xffd9a8) },
 			uSunIntensity: { value: 1 },
 			uWaterHalf: { value: new THREE.Vector2(domain * 0.5, domain * 0.5) },
@@ -39,7 +41,7 @@ export class Terrain {
 			dithering: true,
 		});
 		mat.onBeforeCompile = (shader) => this.patchMaterial(shader);
-		mat.customProgramCacheKey = () => 'stillwater-terrain-v3';
+		mat.customProgramCacheKey = () => 'stillwater-terrain-v4';
 		this.material = mat;
 
 		this.mesh = new THREE.Mesh(this.geometry, mat);
@@ -138,6 +140,7 @@ uniform sampler2D uBed;
 uniform float uDomain;
 uniform float uHalf;
 uniform float uWaterLevel;
+uniform vec2 uSimulationTexel;
 uniform vec3 uSunColor;
 uniform float uSunIntensity;
 uniform vec2 uWind;
@@ -246,13 +249,14 @@ float sw_groundBump(vec2 p){
   if (under > 0.001 && uSunIntensity > 0.01) {
     vec2 uv = (vWPos.xz + uHalf) / uDomain;
     float etaM = texture2D(uMacro, uv).r;
-    vec2 e = vec2(1.0 / 256.0, 1.0 / 256.0);
+    vec2 e = uSimulationTexel;
     float etaL = texture2D(uMacro, uv - vec2(e.x, 0.0)).r;
     float etaR = texture2D(uMacro, uv + vec2(e.x, 0.0)).r;
     float etaU = texture2D(uMacro, uv - vec2(0.0, e.y)).r;
     float etaD = texture2D(uMacro, uv + vec2(0.0, e.y)).r;
-    float lap = (etaL + etaR + etaU + etaD - 4.0 * etaM) * 70.0;
-    vec2 grad = vec2(etaR - etaL, etaD - etaU) * 22.0;
+    float cell = uDomain * e.x;
+    float lap = (etaL + etaR + etaU + etaD - 4.0 * etaM) / (cell * cell) * 0.427;
+    vec2 grad = vec2(etaR - etaL, etaD - etaU) / (2.0 * cell) * 3.44;
     float time = uTime * 0.42;
     float c1 = sw_caustic(vWPos.xz * 0.62 + grad * 0.9, time);
     float c2 = sw_caustic(vWPos.xz * 0.91 - grad * 0.6 + 4.3, time * 0.8 + 7.1);
@@ -266,12 +270,27 @@ float sw_groundBump(vec2 p){
 }`);
 	}
 
-	update(dt, time, macroTexture, microTexture, sun, wind) {
+	setSimulationSize(n) {
+		if (!Number.isInteger(n) || n < 2) throw new RangeError('Terrain simulation size must be an integer of at least 2');
+		this.simulationSize = n;
+		this.uniforms.uSimulationTexel.value.setScalar(1 / n);
+	}
+
+	update(dt, time, macroTexture, microTexture, sun, wind, waterLevel = this.uniforms.uWaterLevel.value) {
 		this.uniforms.uTime.value = time;
 		this.uniforms.uMacro.value = macroTexture;
 		this.uniforms.uMicro.value = microTexture;
+		const macroSize = macroTexture?.image?.width || macroTexture?.width;
+		if (Number.isFinite(macroSize) && macroSize !== this.simulationSize) this.setSimulationSize(macroSize);
 		this.uniforms.uSunColor.value.copy(sun.sunColor);
 		this.uniforms.uSunIntensity.value = sun.sunIntensity;
 		this.uniforms.uWind.value.copy(wind);
+		if (Number.isFinite(waterLevel)) this.uniforms.uWaterLevel.value = waterLevel;
+	}
+
+	dispose() {
+		this.mesh.removeFromParent();
+		this.geometry.dispose();
+		this.material.dispose();
 	}
 }

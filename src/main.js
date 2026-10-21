@@ -7,9 +7,20 @@ try {
 	window.__pond = app;
 	app.ready = true;
 } catch (err) {
-	console.error(err);
+	// Unsupported graphics is an expected, user-facing capability state rather
+	// than a recoverable application exception. Keep it out of the console error
+	// channel so automated/browser diagnostics can distinguish it from a bug.
+	if (err?.code !== 'UNSUPPORTED_DEVICE') console.error(err);
 	const status = document.querySelector('.load-status');
-	if (status) status.textContent = 'webgl2 is required — ' + err.message;
+	if (status) status.textContent = err.code === 'UNSUPPORTED_DEVICE'
+		? 'this browser or device cannot render the pond — ' + err.message
+		: 'the pond could not start — ' + err.message;
+	if (status) {
+		status.setAttribute('role', 'alert');
+		status.setAttribute('aria-live', 'assertive');
+	}
+	const loading = document.getElementById('loading');
+	if (loading) loading.setAttribute('aria-busy', 'false');
 }
 
 // cursor
@@ -53,6 +64,7 @@ if (app) {
 		rainOut.textContent = Math.round(v * 100) + '%';
 		app.setRain(v);
 	});
+	document.getElementById('quality-select').addEventListener('change', (e) => app.setQuality(e.currentTarget.value));
 	timeOut.textContent = fmtTime(parseFloat(timeSlider.value));
 	windOut.textContent = Math.round(parseFloat(windSlider.value) * 100) + '%';
 
@@ -80,9 +92,9 @@ if (app) {
 		const p = presets[b.dataset.preset];
 		if (!p) return;
 		timeSlider.value = p.t; windSlider.value = p.wind; rainSlider.value = p.rain;
-		timeSlider.dispatchEvent(new Event('input'));
-		windSlider.dispatchEvent(new Event('input'));
-		rainSlider.dispatchEvent(new Event('input'));
+		app.setTime(p.t);
+		app.setWind(p.wind, 2.75);
+		app.setRain(p.rain);
 		document.querySelectorAll('.chip[data-preset]').forEach((c) => c.classList.remove('active'));
 		b.classList.add('active');
 	}));
@@ -91,6 +103,10 @@ if (app) {
 		const collapsed = document.getElementById('conditions').classList.toggle('collapsed');
 		e.currentTarget.textContent = collapsed ? '⚙' : '−';
 		e.currentTarget.title = collapsed ? 'Expand' : 'Collapse';
+	});
+	document.getElementById('sound-btn').addEventListener('click', () => {
+		void app.audio.init();
+		app.toggleMute();
 	});
 	document.getElementById('help-btn').addEventListener('click', () => {
 		document.getElementById('help').classList.toggle('hidden');
@@ -101,11 +117,23 @@ if (app) {
 	document.getElementById('help').addEventListener('click', (e) => {
 		if (e.target.id === 'help') document.getElementById('help').classList.add('hidden');
 	});
+	document.getElementById('photo-exit').addEventListener('click', () => app.setPhotoMode(false));
 
 	window.addEventListener('keydown', (e) => {
+		const target = e.target;
+		const editable = target && (target.matches?.('input, select, textarea') || target.isContentEditable);
+		if (editable) return;
+		if (e.repeat && ['h', 'H', 'p', 'P', 'm', 'M', 'r', 'R'].includes(e.key)) return;
+		if (e.key === 'Escape') {
+			document.getElementById('help').classList.add('hidden');
+			if (document.body.classList.contains('photo')) app.setPhotoMode(false);
+			app.cancelPointerInteraction();
+			return;
+		}
 		if (e.key === 'h' || e.key === 'H') document.getElementById('help').classList.toggle('hidden');
-		if (e.key === 'p' || e.key === 'P') document.body.classList.toggle('photo');
-		if (e.key === 'm' || e.key === 'M') { app.audio.init(); app.toggleMute(); }
+		if (e.key === 'p' || e.key === 'P') app.setPhotoMode(!document.body.classList.contains('photo'));
+		if (e.key === 'm' || e.key === 'M') { void app.audio.init(); app.toggleMute(); }
+		if (e.key === 'r' || e.key === 'R') app.toggleRain();
 		const modes = { '1': 'throw', '2': 'touch', '3': 'feed' };
 		if (modes[e.key]) {
 			const btn = document.querySelector(`.mode[data-mode="${modes[e.key]}"]`);

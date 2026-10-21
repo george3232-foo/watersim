@@ -4,9 +4,9 @@ An interactive, physically-grounded pond rendered with Three.js and WebGL2. Ever
 terrain, plants, trees, fish, props, sky and sound — is generated procedurally; there are no
 textured or modelled assets.
 
-Throw pebbles, stones, apples, a rubber duck, a beach ball or a leaf into the water. Drag a
-finger (or the mouse) through the surface to stir it. Sprinkle food and watch the koi rise,
-nibble — and scatter when something hits the pond.
+Throw pebbles, stones, apples, a rubber duck, a beach ball or a leaf into the water. Hold to
+charge the throw and release to launch. Drag a finger (or the mouse) through the surface to stir
+it. Sprinkle food and watch the koi rise, nibble — and scatter when something hits the pond.
 
 **Live demo:** https://george3232-foo.github.io/watersim/
 
@@ -18,8 +18,9 @@ npm run dev      # http://localhost:5173
 npm run build
 ```
 
-Requires a WebGL2 browser. The simulation uses float render targets; on devices without
-`EXT_color_buffer_float` it falls back to half-float, then to RGBA8.
+Requires a WebGL2 browser with a renderable signed float or half-float RGBA target. The app probes
+actual framebuffer support and shows an explicit unsupported-device message instead of silently
+running a corrupt byte-texture solver.
 
 ## Controls
 
@@ -33,9 +34,11 @@ Requires a WebGL2 browser. The simulation uses float render targets; on devices 
 | `H` | Help |
 | `P` | Photo mode (hides UI) |
 | `M` | Mute |
+| `R` | Toggle rain |
 
-The conditions panel changes time of day, wind strength and rain. The presets jump to a golden
-evening, dawn, overcast, a rainy afternoon or night.
+The conditions panel changes time of day, wind strength, rain and rendering quality. Quality can be
+set to Auto, High, Medium or Low. Auto adapts only after sustained frame-time evidence with
+hysteresis. The presets jump to a golden evening, dawn, overcast, a rainy afternoon or night.
 
 ## How the water works
 
@@ -67,7 +70,7 @@ depth limits and camera-relative effects all sample that CPU mirror of the GPU s
   grade, vignette, grain and FXAA.
 
 Debug water buffers with `?debug=N` (1 reflection, 2 refraction, 3 Fresnel, 4 absorption,
-5 foam, 6 scene, 7 normals, 8 N·V, 9 depth). `?quality=low|high` scales resolution.
+5 foam, 6 scene, 7 normals, 8 N·V, 9 depth). `?quality=low|medium|high|auto` selects quality.
 
 ## Fish
 
@@ -99,15 +102,28 @@ scripts/         verify.mjs (screenshot + console), interact.mjs (mode tests)
 ## Verification
 
 ```bash
-node scripts/verify.mjs     # screenshot + console check → /tmp/pond.png
-node scripts/interact.mjs   # throw / stir / feed test → /tmp/pond-interact.png
+npm test                    # deterministic unit tests
+npm run test:browser        # Playwright behavior, resize, capability and water-health checks
+npm run test:all            # unit + browser suite
+npm run verify              # assertion-based smoke run + day/night screenshots
+npm run interact            # throw / stir / feed / quality scenario + screenshots
 ```
 
-Both run headless Chromium with SwiftShader and are expected to report an empty console log.
+The browser checks use headless Chromium with ANGLE by default. Set
+`POND_BROWSER_GPU=swiftshader` for a software-GPU run. Browser/page errors, failed readiness,
+failed screenshots and unexpected warnings fail the command. Reports and screenshots are written
+to `tests/artifacts/` unless `POND_OUTPUT_DIR` or `--output-dir` is supplied.
+
+On the Intel UHD 630 used during tuning, clean low-quality smoke runs varied from roughly 10–30 FPS
+after reducing low-tier solver, reflection, shadow and forest work (the earlier baseline was roughly
+5–9 FPS). This is a local measurement, not a universal device guarantee; runtime diagnostics expose
+actual frame, draw-call, triangle, CPU submission and asynchronous GPU timing data.
 
 ## Trade-offs
 
 The heightfield approach is the standard real-time approximation for pond-scale water. Vertical
 spray is represented by short-lived ripple/foam impulses rather than a volumetric phase, and the
-two frequency bands are hand-split rather than solved by a fully dispersive model. Everything is
-tuned to look and respond plausibly at pond scale; it is not a Navier–Stokes solver.
+two frequency bands are hand-split rather than solved by a fully dispersive model. Floating
+objects use fixed-step rigid-body approximations, sampled water normals, bounded displaced-volume
+level offset and wake impulses rather than a full volumetric two-way solver. Everything is tuned to
+look and respond plausibly at pond scale; it is not a Navier–Stokes solver.

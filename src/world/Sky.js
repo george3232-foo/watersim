@@ -65,7 +65,7 @@ void main(){
   // every layer stays in the same gloomy key.
   col *= mix(1.0, 0.46, uStorm);
   col = mix(col, vec3(dot(col, vec3(0.33))) * vec3(0.68, 0.78, 0.80), uStorm * 0.52);
-  col = mix(col, uHorizon * vec3(1.02, 0.94, 0.82), exp(-hp * 28.0) * 0.34 * (1.0 - uStorm * 0.90));
+  col = mix(col, uHorizon * vec3(1.02, 0.94, 0.82), exp(-hp * 28.0) * 0.34 * (1.0 - uStorm * 0.90) * (1.0 - uNight));
   // faint cool band just above the horizon, opposite the sun
   float anti = clamp(-dot(normalize(vec3(d.x, 0.0, d.z)), normalize(vec3(uSunDir.x, 0.0, uSunDir.z))) * 0.5 + 0.5, 0.0, 1.0);
   col = mix(col, uZenith * 0.9, exp(-hp * 7.0) * anti * 0.16);
@@ -93,11 +93,12 @@ void main(){
     float sunSide = clamp(dot(normalize(vec3(d.x, 0.30, d.z)), normalize(uSunDir)), 0.0, 1.0);
     vec3 shade = mix(uZenith * 0.38, uHorizon * 0.16, 0.42);
     shade *= 1.0 - uStorm * 0.50;
-    vec3 lit = mix(uHorizon * 0.68, uSunColor * 0.92, clamp(pow(sunSide, 1.4) * 0.8 + 0.12, 0.0, 1.0));
+    vec3 cloudLight = mix(uSunColor * 0.92, uMoonColor * 0.055, uNight);
+    vec3 lit = mix(uHorizon * 0.68, cloudLight, clamp(pow(sunSide, 1.4) * 0.8 + 0.12, 0.0, 1.0));
     lit *= 1.0 - uStorm * 0.68;
     vec3 cloud = mix(shade, lit, 0.38 + 0.34 * (1.0 - cov) + 0.22 * sunSide);
     // silver rim towards the sun
-    cloud += uSunColor * pow(mu, 14.0) * 0.22 * (1.0 - cov) * (1.0 - uStorm * 0.9);
+    cloud += uSunColor * pow(mu, 14.0) * 0.22 * (1.0 - cov) * (1.0 - uStorm * 0.9) * (1.0 - uNight);
     cloud = mix(cloud, uZenith * 0.65, 0.16);
     cloud *= 1.0 - uStorm * 0.52;
     col = mix(col, cloud, cov * (0.80 - 0.25 * uNight));
@@ -106,29 +107,32 @@ void main(){
     vec2 cuv2 = d.xz / (h + 0.22);
     float cir = fbm(vec2(cuv2.x * 1.9, cuv2.y * 7.5) + vec2(uTime * 0.0025, 0.0));
     float cirCov = smoothstep(0.575, 0.73, cir) * smoothstep(0.03, 0.30, h) * (0.23 - 0.10 * uCover);
-    vec3 cirCol = mix(uHorizon * 0.55, uSunColor * 0.62, clamp(pow(mu, 2.0) * 0.6, 0.0, 1.0));
+    vec3 cirLight = mix(uSunColor * 0.62, uMoonColor * 0.035, uNight);
+    vec3 cirCol = mix(uHorizon * 0.55, cirLight, clamp(pow(mu, 2.0) * 0.6, 0.0, 1.0));
     col = mix(col, cirCol, max(cirCov, 0.0) * 0.65);
   }
 
   // stars and the moon at night
   if (uNight > 0.005) {
+    float clearNight = uNight * (1.0 - uCover * 0.78) * (1.0 - uStorm * 0.92);
+    float moonNight = uNight * (1.0 - uCover * 0.35) * (1.0 - uStorm * 0.72);
     vec3 sp = d * 210.0;
     vec3 cell = floor(sp);
     float r = hash31(cell);
     vec3 fp = fract(sp) - 0.5;
-    float star = smoothstep(0.055, 0.0, length(fp)) * step(0.9925, r);
+    float star = (1.0 - smoothstep(0.0, 0.055, length(fp))) * step(0.9925, r);
     star *= 0.35 + 0.65 * hash31(cell + 9.1);
     float tw = 0.72 + 0.28 * sin(uTime * 1.7 + r * 40.0);
     float horizonFade = smoothstep(0.02, 0.25, h);
-    col += vec3(0.78, 0.86, 1.0) * star * tw * uNight * 1.9 * horizonFade;
+    col += vec3(0.78, 0.86, 1.0) * star * tw * clearNight * 1.9 * horizonFade;
     float band = exp(-pow((dot(d, normalize(vec3(0.2, 0.25, -0.94)))) / 0.16, 2.0));
-    col += vec3(0.10, 0.12, 0.19) * band * uNight * (0.22 + 0.5 * fbm(d.xz * 5.0 + 3.0));
+    col += vec3(0.10, 0.12, 0.19) * band * clearNight * horizonFade * (0.22 + 0.5 * fbm(d.xz * 5.0 + 3.0));
 
     float mm = max(dot(d, uMoonDir), 0.0);
     float moonDisc = smoothstep(0.99972, 0.99987, mm);
-    col += uMoonColor * moonDisc * 15.0 * uNight;
-    col += uMoonColor * pow(mm, 280.0) * 0.22 * uNight;
-    col += uMoonColor * pow(mm, 12.0) * 0.045 * uNight;
+    col += uMoonColor * moonDisc * 15.0 * moonNight;
+    col += uMoonColor * pow(mm, 280.0) * 0.22 * moonNight;
+    col += uMoonColor * pow(mm, 12.0) * 0.045 * moonNight;
   }
 
   // below the horizon: a dark, hazy ground tone (mostly covered by landscape)
@@ -206,6 +210,13 @@ export class Sky {
 		this.sun.target.position.set(0, 0, 0);
 		scene.add(this.sun, this.sun.target);
 
+		// A broad, cool source gives the banks shape at night without another
+		// shadow pass. Its direction matches the moon drawn in the sky.
+		this.moonLight = new THREE.DirectionalLight(0xb5ccf0, 0);
+		this.moonLight.name = 'moon-light';
+		this.moonLight.castShadow = false;
+		scene.add(this.moonLight, this.moonLight.target);
+
 		this.hemi = new THREE.HemisphereLight(0xbfd7ff, 0x2b2a1e, 0.85);
 		scene.add(this.hemi);
 
@@ -259,7 +270,9 @@ export class Sky {
 			fog: false,
 		});
 
-		scene.fog = new THREE.FogExp2(0xb4916f, 0.0075);
+		this.previousFog = scene.fog;
+		this.fog = new THREE.FogExp2(0xb4916f, 0.0075);
+		scene.fog = this.fog;
 
 		this.storm = 0;
 		this.flash = 0;
@@ -268,6 +281,7 @@ export class Sky {
 		this.nextFlash = 4 + Math.random() * 8;
 		this.onLightning = null;
 		this.baseSun = 4.8;
+		this.baseMoon = 0;
 		this.baseHemi = 0.78;
 		this.baseFill = 0.82;
 		this.baseEnv = 0.8;
@@ -296,6 +310,7 @@ export class Sky {
 			deepColor: new THREE.Color(0x062c2c),
 			night: 0,
 			day: 1,
+			moonIntensity: 0,
 			haze: 0.55,
 		};
 		this.setTime(this.hour);
@@ -303,8 +318,19 @@ export class Sky {
 	}
 
 	sunDirection(hour) {
-		const az = Math.PI * (hour - 6) / 14;
-		const el = Math.sin(clamp((hour - 6) / 14, 0, 1) * Math.PI) * (61 * DEG);
+		const h = ((hour % 24) + 24) % 24;
+		let phase;
+		if (h >= 6 && h <= 20) {
+			// Keep the original daytime composition, especially golden hour.
+			phase = Math.PI * (h - 6) / 14;
+		} else {
+			const t = (h >= 20 ? h - 20 : h + 4) / 10;
+			// The shorter night arc matches the daytime angular speed at both
+			// horizons. Position AND velocity are continuous, including midnight.
+			phase = Math.PI + Math.PI * (t - (2 / 7) * Math.sin(2 * Math.PI * t) / (2 * Math.PI));
+		}
+		const az = phase;
+		const el = Math.sin(phase) * (61 * DEG);
 		const ce = Math.cos(el);
 		return new THREE.Vector3(ce * Math.cos(az), Math.sin(el), -ce * Math.sin(az)).normalize();
 	}
@@ -315,7 +341,7 @@ export class Sky {
 		const sinEl = sunDir.y;
 		const day = smoothstep(-0.06, 0.22, sinEl);
 		const night = 1 - smoothstep(-0.18, 0.02, sinEl);
-		const golden = Math.exp(-Math.pow((sinEl - 0.055) / 0.26, 2));
+		const golden = Math.exp(-Math.pow((sinEl - 0.055) / 0.26, 2)) * (1 - night);
 
 		const dayZen = new THREE.Color(0x2f6cab);
 		const dayHor = new THREE.Color(0xbcd4df);
@@ -323,8 +349,8 @@ export class Sky {
 		const goldHor = new THREE.Color(0xf6a25f);
 		const duskZen = new THREE.Color(0x1a2a47);
 		const duskHor = new THREE.Color(0xd17550);
-		const nightZen = new THREE.Color(0x01030a);
-		const nightHor = new THREE.Color(0x091120);
+		const nightZen = new THREE.Color(0x071020);
+		const nightHor = new THREE.Color(0x172637);
 
 		const zen = new THREE.Color().copy(nightZen);
 		const hor = new THREE.Color().copy(nightHor);
@@ -339,7 +365,7 @@ export class Sky {
 		const sunColor = new THREE.Color(0xff9d55).lerp(new THREE.Color(0xffe9c8), smoothstep(0.06, 0.60, sinEl));
 		const sunIntensity = smoothstep(-0.005, 0.18, sinEl) * (0.62 + 0.38 * smoothstep(0.06, 0.62, sinEl));
 		const moonDir = new THREE.Vector3(-0.5, 0.68, -0.54).normalize();
-		const ground = new THREE.Color(0x0f1613);
+		const ground = new THREE.Color(0x0f1613).lerp(new THREE.Color(0x0a1117), night);
 
 		this.uniforms.uZenith.value.copy(zen);
 		this.uniforms.uHorizon.value.copy(hor);
@@ -356,15 +382,14 @@ export class Sky {
 		this.sun.intensity = 4.8 * sunIntensity;
 		this.sun.visible = sunIntensity > 0.002;
 		this.moonDir = moonDir;
+		this.moonLight.position.copy(moonDir).multiplyScalar(45);
 		this.hemi.color.copy(zen).lerp(new THREE.Color(0xbfd7ff), 0.4);
-		this.hemi.groundColor.copy(new THREE.Color(0x2b2a1e));
-		this.hemi.intensity = 0.78 * day + 0.12 * night + 0.045;
-		this.fill.intensity = 0.82 * day + 0.04;
+		this.hemi.groundColor.set(0x2b2a1e).lerp(new THREE.Color(0x17242e), night);
 		this.lantern.intensity = night * 4.2 + (1 - day) * 2.6;
 
 		this.state.sunDir.copy(sunDir);
 		this.state.sunColor.copy(sunColor);
-		this.state.sunIntensity = 0.22 + sunIntensity * 4.8;
+		this.state.sunIntensity = (0.22 + sunIntensity * 4.8) * (1 - night);
 		this.state.skyColor.copy(zen);
 		this.state.horizonColor.copy(hor);
 		this.state.night = night;
@@ -377,9 +402,10 @@ export class Sky {
 
 		// Remember the clear-weather light so weather changes never compound.
 		this.baseSun = 4.8 * sunIntensity;
-		this.baseHemi = 0.78 * day + 0.12 * night + 0.045;
-		this.baseFill = 0.82 * day + 0.04;
-		this.baseEnv = 0.82 * day + 0.12 * night + 0.05;
+		this.baseMoon = 0.32 * night;
+		this.baseHemi = 0.78 * day + 0.18 * night + 0.045;
+		this.baseFill = 0.82 * day + 0.06 * night + 0.04;
+		this.baseEnv = 0.82 * day + 0.20 * night + 0.05;
 		this.baseFog = 0.0032 + night * 0.005;
 		this.baseSunState = this.state.sunIntensity;
 		this.sunLevel = sunIntensity;
@@ -399,11 +425,14 @@ export class Sky {
 
 		this.sun.intensity = this.baseSun * (1 - storm * 0.84);
 		this.sun.visible = this.sun.intensity > 0.02;
+		this.moonLight.intensity = this.baseMoon * (1 - this.cloudCover * 0.35) * (1 - storm * 0.72);
+		this.moonLight.visible = this.moonLight.intensity > 0.001;
 		this.hemi.intensity = this.baseHemi * (1 - storm * 0.48);
 		this.fill.intensity = this.baseFill * (1 - storm * 0.6);
 		this.scene.environmentIntensity = this.baseEnv * (1 - storm * 0.55);
 
 		this.state.sunIntensity = this.baseSunState * (1 - storm * 0.86);
+		this.state.moonIntensity = this.moonLight.intensity;
 		this.state.skyColor.copy(this.baseZen).multiplyScalar(1 - storm * 0.58);
 		this.state.horizonColor.copy(this.baseHor).multiplyScalar(1 - storm * 0.5);
 		this.state.scatterColor.copy(this.baseScatter).multiplyScalar(1 - storm * 0.55);
@@ -412,13 +441,14 @@ export class Sky {
 
 		// Dense, cold haze under the storm. The green-grey keeps the meadow from
 		// turning into a flat grey card while the sky is almost monochrome.
+		const fogTint = new THREE.Color(0x58645f).lerp(new THREE.Color(0x182939), this.state.night);
 		const fogCol = this.baseHor.clone()
-			.lerp(new THREE.Color(0x58645f), 0.34 + storm * 0.4)
+			.lerp(fogTint, 0.34 + storm * 0.4)
 			.multiplyScalar((0.86 + this.state.day * 0.2) * (1 - storm * 0.32));
-		this.scene.fog.color.copy(fogCol);
-		this.scene.fog.density = this.baseFog + this.rain * 0.030 + storm * 0.009;
-		this.state.fogColor = this.scene.fog.color.clone();
-		this.state.fogDensity = this.scene.fog.density;
+		this.fog.color.copy(fogCol);
+		this.fog.density = this.baseFog + this.rain * 0.030 + storm * 0.009;
+		this.state.fogColor = this.fog.color.clone();
+		this.state.fogDensity = this.fog.density;
 
 		this.envDirty = true;
 	}
@@ -430,12 +460,27 @@ export class Sky {
 		this.applyWeather();
 	}
 
+	setQuality(settings = {}) {
+		if (!Number.isFinite(settings.shadowSize)) return this;
+		const size = settings.shadowSize <= 512 ? 512 : settings.shadowSize <= 1024 ? 1024 : 2048;
+		const shadow = this.sun.shadow;
+		if (shadow.mapSize.x === size && shadow.mapSize.y === size) return this;
+		shadow.dispose();
+		shadow.map = null;
+		shadow.mapPass = null;
+		shadow.mapSize.set(size, size);
+		shadow.needsUpdate = true;
+		if (this.renderer.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+		return this;
+	}
+
 	// One jagged, emissive tube per strike. Fog is disabled on the material so
 	// the bolt still reads through the storm haze; the flash itself does the
 	// atmospheric scattering.
 	spawnBolt(azimuth, distance, top = 26 + Math.random() * 8, bottom = 5 + Math.random() * 6) {
 		while (this.bolt.children.length) {
-			const child = this.bolt.children.pop();
+			const child = this.bolt.children[0];
+			this.bolt.remove(child);
 			child.geometry.dispose();
 		}
 
@@ -522,6 +567,7 @@ export class Sky {
 	}
 
 	update(dt, camera) {
+		if (this.disposed) return;
 		this.uniforms.uTime.value += dt;
 		if (camera) {
 			this.lastCamera = camera;
@@ -577,13 +623,44 @@ export class Sky {
 	}
 
 	refreshEnvironment() {
-		if (this._env) this._env.dispose();
+		if (this.disposed) return;
 		try {
 			const env = this.pmrem.fromScene(this.skyScene, 0.035, 0.1, 1000);
+			const previous = this._env;
 			this._env = env;
 			this.scene.environment = env.texture;
+			previous?.dispose();
 		} catch (e) {
 			console.warn('Environment generation failed', e);
+		}
+	}
+
+	dispose() {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.onLightning = null;
+		this.lastCamera = null;
+		this.envDirty = false;
+		if (this._env && this.scene.environment === this._env.texture) this.scene.environment = null;
+		if (this.scene.fog === this.fog) this.scene.fog = this.previousFog;
+		this._env?.dispose();
+		this._env = null;
+		this.pmrem.dispose();
+		this.sun.shadow.dispose();
+		this.sun.shadow.map = null;
+		this.sun.shadow.mapPass = null;
+		for (const child of this.bolt.children) child.geometry.dispose();
+		this.bolt.clear();
+		this.boltMat.dispose();
+		this.boltBranchMat.dispose();
+		this.boltCoreMat.dispose();
+		this.boltGlowMat.dispose();
+		this.geometry.dispose();
+		this.material.dispose();
+		this.skyScene.clear();
+		for (const object of [this.mesh, this.sun, this.sun.target, this.moonLight, this.moonLight.target,
+			this.hemi, this.fill, this.fill.target, this.lantern, this.flashLight, this.flashLight.target, this.bolt]) {
+			object.removeFromParent();
 		}
 	}
 }

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { surfaceHeight } from '../life/WaterCoupling.js';
 
 // Splash / droplet / ripple effects for objects entering the pond.
 //
@@ -138,6 +139,14 @@ void main(){
 }`;
 
 const TAU = Math.PI * 2;
+const DEFAULT_PROFILE = { strength: 1, crown: 1, up: 1, spread: 1, foam: 1, jets: 1, ring: 1 };
+const FLOATER_PROFILE = { strength: 0.7, crown: 0.55, up: 0.6, spread: 1.05, foam: 0.45, jets: 0, ring: 0.95 };
+const PROFILES = {
+	pebble: { strength: 0.85, crown: 0.7, up: 1.1, spread: 0.65, foam: 0.3, jets: 0.6, ring: 0.75 },
+	stone: { strength: 1.2, crown: 1.3, up: 1.05, spread: 1.15, foam: 1.6, jets: 1.3, ring: 1.15 },
+	apple: FLOATER_PROFILE, duck: FLOATER_PROFILE, ball: FLOATER_PROFILE, floater: FLOATER_PROFILE,
+	leaf: { strength: 0.18, crown: 0.06, up: 0.22, spread: 0.65, foam: 0.08, jets: 0, ring: 0.55 },
+};
 
 function smooth01(a, b, x) {
 	const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -199,13 +208,18 @@ export class SplashFX {
 		this.camera = opts.camera || null;
 		this.renderer = opts.renderer || null;
 		this.engine = opts.engine || null;
+		this.sim = opts.sim || null;
 
-		this.maxDroplets = opts.maxDroplets ?? 420;
-		this.maxRings = opts.maxRings ?? 12;
+		this.maxDroplets = Number.isFinite(opts.maxDroplets) ? Math.max(1, Math.min(4096, Math.floor(opts.maxDroplets))) : 420;
+		this.maxRings = Number.isFinite(opts.maxRings) ? Math.max(1, Math.min(64, Math.floor(opts.maxRings))) : 12;
 		this._dropletCursor = 0;
 		this._ringCursor = 0;
 		this._time = 0;
 		this._occlusionMaterials = [];
+		this._surface = { height: 0, depth: 0 };
+		this._ringSpec = {};
+		this._disposed = false;
+		this.metrics = { droplets: 0, rings: 0 };
 
 		this._initParticles();
 		this._initRings();
@@ -227,6 +241,7 @@ export class SplashFX {
 		this._drag = new Float32Array(cap);
 		this._alpha = new Float32Array(cap);
 		this._seed = new Float32Array(cap);
+		this._surfaceBase = new Float32Array(cap);
 
 		const geo = new THREE.BufferGeometry();
 		this._renderPos = new Float32Array(cap * 3);
@@ -291,6 +306,7 @@ export class SplashFX {
 				alpha0: 0,
 				width: 0.01,
 				foam0: 0,
+				x: 0, z: 0, height: 0,
 				y: 0.014,
 				seed: 0,
 			});
@@ -302,26 +318,29 @@ export class SplashFX {
 	 * @param {number} x world x
 	 * @param {number} z world z
 	 * @param {number} impact 0.002..0.5 mass/velocity scale from Throwables
-	 * @param {{radius?:number, vy?:number, scale?:number}} opts
+	 * @param {{type?:string, radius?:number, vy?:number, height?:number, scale?:number}} opts
 	 */
 	splashAt(x, z, impact, opts = {}) {
-		if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+		if (this._disposed || !Number.isFinite(x) || !Number.isFinite(z)) return;
 		const imp = Math.min(0.5, Math.max(0, Number.isFinite(impact) ? impact : 0));
-		const radius = opts.radius ?? 0.06;
-		const vy = Math.abs(opts.vy ?? 2.0);
-		const userScale = opts.scale ?? 1;
+		const radius = Number.isFinite(opts.radius) ? Math.max(0.005, Math.min(0.5, opts.radius)) : 0.06;
+		const vy = Number.isFinite(opts.vy) ? Math.min(12, Math.abs(opts.vy)) : 2;
+		const userScale = Number.isFinite(opts.scale) ? Math.max(0, Math.min(2, opts.scale)) : 1;
+		if (userScale === 0) return;
+		const profile = PROFILES[opts.type] || DEFAULT_PROFILE;
+		const height = Number.isFinite(opts.height) ? opts.height : this._heightAt(x, z, 0);
 
 		// Normalise against the maximum the throwables hook can report. Cubing
 		// would make light impacts vanish; a 0.65 power keeps pebbles restrained
 		// while stones/ducks still get a full crown.
 		let strength = Math.pow(imp / 0.5, 0.65);
 		strength *= Math.min(1.3, Math.max(0.72, radius / 0.07));
-		strength = Math.min(1, Math.max(0.035, strength)) * userScale;
+		strength = Math.min(1.5, Math.min(1, Math.max(0.035, strength)) * userScale * profile.strength);
 
 		const radiusScale = Math.min(1.3, Math.max(0.8, radius / 0.07));
-		const nDroplets = Math.round(10 + 24 * strength);
-		const spread = (0.050 + 0.120 * strength) * radiusScale;
-		const baseUp = 1.05 + 1.35 * strength + Math.min(0.45, vy * 0.10);
+		const nDroplets = Math.round((10 + 24 * strength) * profile.crown);
+		const spread = (0.050 + 0.120 * strength) * radiusScale * profile.spread;
+		const baseUp = (1.05 + 1.35 * strength + Math.min(0.45, vy * 0.10)) * profile.up;
 		const rand = Math.random;
 
 		// Crown: a ring of droplets thrown up and out from the entry crater.
@@ -333,7 +352,7 @@ export class SplashFX {
 			const up = baseUp * (0.62 + rand() * 0.52) + (1 - edge) * 0.38 * strength;
 			this._spawnParticle(
 				x + Math.cos(a) * rr,
-				0.022 + rand() * 0.045,
+				height + 0.022 + rand() * 0.045 * profile.up,
 				z + Math.sin(a) * rr,
 				Math.cos(a) * outward + (rand() - 0.5) * 0.10,
 				up,
@@ -342,18 +361,18 @@ export class SplashFX {
 				Math.min(0.045, Math.max(0.01, (0.012 + rand() * 0.022 + 0.010 * strength) * radiusScale)),
 				9.81,
 				0.35 + rand() * 0.25,
-				0.55 + rand() * 0.38
+				0.55 + rand() * 0.38, height
 			);
 		}
 
 		// A few heavier central jets give the crown some vertical structure.
-		const jets = 1 + Math.floor(strength * 3.2);
+		const jets = Math.round((1 + Math.floor(strength * 3.2)) * profile.jets);
 		for (let i = 0; i < jets; i++) {
 			const a = rand() * TAU;
 			const rr = spread * 0.22 * rand();
 			this._spawnParticle(
 				x + Math.cos(a) * rr,
-				0.025 + rand() * 0.03,
+				height + 0.025 + rand() * 0.03,
 				z + Math.sin(a) * rr,
 				Math.cos(a) * (0.05 + rand() * 0.15),
 				baseUp * (1.20 + rand() * 0.5),
@@ -362,18 +381,18 @@ export class SplashFX {
 				Math.min(0.045, Math.max(0.01, (0.015 + rand() * 0.018) * radiusScale)),
 				9.81,
 				0.30,
-				0.62 + rand() * 0.30
+				0.62 + rand() * 0.30, height
 			);
 		}
 
 		// Foam / bubble flecks that linger on the surface for a moment.
-		const nFoam = 4 + Math.round(9 * strength);
+		const nFoam = Math.round((4 + 9 * strength) * profile.foam);
 		for (let i = 0; i < nFoam; i++) {
 			const a = rand() * TAU;
 			const rr = spread * (0.35 + rand() * 0.65);
 			this._spawnParticle(
 				x + Math.cos(a) * rr,
-				0.012 + rand() * 0.008,
+				height + 0.012 + rand() * 0.008,
 				z + Math.sin(a) * rr,
 				Math.cos(a) * (0.06 + rand() * 0.22),
 				0.04 + rand() * (0.16 + 0.22 * strength),
@@ -382,30 +401,33 @@ export class SplashFX {
 				(0.007 + rand() * 0.013) * radiusScale,
 				0.0,
 				4.2,
-				0.42 + rand() * 0.32
+				0.42 + rand() * 0.32, height
 			);
 		}
 
 		// Expanding surface rings. Up to three, progressively delayed/slower.
 		const nRings = 1 + (strength > 0.28 ? 1 : 0) + (strength > 0.62 ? 1 : 0);
 		for (let i = 0; i < nRings; i++) {
-			const endR = (0.46 + 0.34 * strength) * (1 - i * 0.075);
-			this._spawnRing({
-				x, z,
-				delay: i * 0.075 + rand() * 0.02,
-				life: 0.82 + 0.34 * strength + i * 0.13 + rand() * 0.10,
-				startR: 0.120 + i * 0.018 + rand() * 0.015,
-				endR,
-				alpha0: (0.17 + 0.16 * strength) * (1 - i * 0.24),
-				width: (0.007 + 0.006 * strength) * (1 - i * 0.10),
-				foam0: i === 0 ? 0.40 * strength : 0,
-				y: 0.014 + i * 0.0018,
-				seed: rand() * 100,
-			});
+			const r = this._ringSpec;
+			r.x = x; r.z = z; r.height = height;
+			r.delay = i * 0.075 + rand() * 0.02;
+			r.life = 0.82 + 0.34 * strength + i * 0.13 + rand() * 0.10;
+			r.startR = (0.120 + i * 0.018 + rand() * 0.015) * profile.ring;
+			r.endR = (0.46 + 0.34 * strength) * (1 - i * 0.075) * profile.ring;
+			r.alpha0 = (0.17 + 0.16 * strength) * (1 - i * 0.24) * Math.min(1, profile.strength);
+			r.width = (0.007 + 0.006 * strength) * (1 - i * 0.10);
+			r.foam0 = i === 0 ? Math.min(0.8, 0.40 * strength * profile.foam) : 0;
+			r.y = 0.014 + i * 0.0018;
+			r.seed = rand() * 100;
+			this._spawnRing(r);
 		}
 	}
 
-	_spawnParticle(x, y, z, vx, vy, vz, life, size, gravity, drag, alpha) {
+	_heightAt(x, z, fallback) {
+		return this.sim ? surfaceHeight(this.sim, x, z, this._surface) : fallback;
+	}
+
+	_spawnParticle(x, y, z, vx, vy, vz, life, size, gravity, drag, alpha, height = 0) {
 		const i = this._dropletCursor;
 		this._dropletCursor = (this._dropletCursor + 1) % this.maxDroplets;
 		this._alive[i] = 1;
@@ -418,6 +440,7 @@ export class SplashFX {
 		this._drag[i] = drag;
 		this._alpha[i] = alpha;
 		this._seed[i] = Math.random() * 100;
+		this._surfaceBase[i] = height;
 	}
 
 	_spawnRing(r) {
@@ -432,9 +455,10 @@ export class SplashFX {
 		slot.alpha0 = r.alpha0;
 		slot.width = r.width;
 		slot.foam0 = r.foam0;
+		slot.x = r.x; slot.z = r.z; slot.height = r.height;
 		slot.y = r.y;
 		slot.seed = r.seed;
-		slot.mesh.position.set(r.x, r.y, r.z);
+		slot.mesh.position.set(r.x, this._heightAt(r.x, r.z, r.height) + r.y, r.z);
 		slot.mesh.scale.setScalar(r.endR);
 		slot.mesh.visible = false;
 		const u = slot.mat.uniforms;
@@ -447,13 +471,13 @@ export class SplashFX {
 	}
 
 	update(dt, time) {
-		if (!(dt > 0)) return;
+		if (this._disposed || !Number.isFinite(dt) || !(dt > 0)) return;
 		if (dt > 0.05) dt = 0.05;
 		this._time += dt;
 
 		// point size scale depends on render-target height and vertical fov
 		if (this.camera && this.renderer) {
-			const h = this.renderer.domElement.height || 1;
+			const h = this.engine?.sceneRT?.height || this.renderer.domElement.height || 1;
 			const fov = (this.camera.fov || 50) * Math.PI / 180;
 			this._particleMat.uniforms.uPixelScale.value = h / (2 * Math.tan(fov * 0.5));
 		}
@@ -507,15 +531,17 @@ export class SplashFX {
 			let pz = this._pz[i] + vz * dt;
 
 			// droplets merge back into the pond; foam stays on the surface
+			const height = this._heightAt(px, pz, this._surfaceBase[i]);
 			if (this._gravity[i] > 0.01) {
-				if (py < 0.012) {
+				if (py <= height + 0.008) {
 					this._alive[i] = 0;
 					continue;
 				}
-			} else if (py > 0.22) {
-				// surface bubbles pop instead of drifting into the air
-				vy *= 0.3;
-				py = 0.22;
+			} else {
+				// Foam rides the sampled surface rather than accumulating vertical
+				// drift or remaining behind when displaced water rises.
+				py = height + 0.012 + 0.006 * Math.sin(age * 9 + this._seed[i]);
+				vy = 0;
 			}
 
 			this._vx[i] = vx; this._vy[i] = vy; this._vz[i] = vz;
@@ -538,6 +564,7 @@ export class SplashFX {
 		}
 
 		this._particleGeo.setDrawRange(0, n);
+		this.metrics.droplets = n;
 		if (n > 0) {
 			this._posAttr.needsUpdate = true;
 			this._sizeAttr.needsUpdate = true;
@@ -547,9 +574,11 @@ export class SplashFX {
 	}
 
 	_updateRings(dt) {
+		let active = 0;
 		for (let i = 0; i < this._rings.length; i++) {
 			const r = this._rings[i];
 			if (!r.active) continue;
+			r.mesh.position.y = this._heightAt(r.x, r.z, r.height) + r.y;
 			r.age += dt;
 			if (r.age >= r.life) {
 				r.active = false;
@@ -560,6 +589,7 @@ export class SplashFX {
 				r.mesh.visible = false;
 				continue;
 			}
+			active++;
 			const span = Math.max(1e-4, r.life - r.delay);
 			const t = Math.min(1, Math.max(0, (r.age - r.delay) / span));
 			const ease = 1 - Math.pow(1 - t, 2.1);
@@ -578,5 +608,20 @@ export class SplashFX {
 			u.uFoam.value = foam;
 			r.mesh.visible = alpha > 0.004;
 		}
+		this.metrics.rings = active;
+	}
+
+	dispose() {
+		if (this._disposed) return;
+		this._disposed = true;
+		this._alive.fill(0);
+		this.metrics.droplets = 0;
+		this.metrics.rings = 0;
+		this._particleGeo.dispose();
+		this._ringGeo.dispose();
+		for (const material of this._occlusionMaterials) material.dispose();
+		for (const r of this._rings) { r.active = false; r.mesh.visible = false; }
+		this.group.removeFromParent();
+		this.group.clear();
 	}
 }

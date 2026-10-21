@@ -16,6 +16,7 @@ import { WaterSim } from './water/WaterSim.js';
 import { WaterSurface } from './water/WaterSurface.js';
 import { SplashFX } from './fx/Splash.js';
 import { RainFX } from './fx/Rain.js';
+import { QualityController, QUALITY_PRESETS } from './core/Quality.js';
 
 export class App {
 	constructor(canvas) {
@@ -24,21 +25,20 @@ export class App {
 		this.frame = 0;
 		this.last = performance.now();
 		this.fpsSmooth = 60;
-		this.quality = this.pickQuality();
 		const params = new URLSearchParams(location.search);
 		const q = params.get('quality');
-		if (q === 'low') this.quality.scale = 0.7;
-		if (q === 'high') this.quality.scale = 1.0;
-		const lowMode = q === 'low';
+		const qualityMode = ['auto', 'low', 'medium', 'high'].includes(q) ? q : 'auto';
+		this.quality = new QualityController(qualityMode, 'high');
+		this.qualitySettings = this.quality.settings;
+		const lowMode = this.quality.tier === 'low';
 
 		this.hf = new TerrainHeight(1337);
-		this.bedTexture = createBedTexture(this.hf, 512, 20);
+		const settings = this.qualitySettings;
 
 		this.engine = new Engine(canvas, {
-			qualityScale: this.quality.scale,
-			maxDpr: lowMode ? 1 : 1.6,
-			reflectionScale: lowMode ? 0.7 : 0.85,
+			...settings,
 		});
+		this.bedTexture = createBedTexture(this.hf, 512, 20, this.engine.renderer);
 		this.scene = new THREE.Scene();
 		this.scene.background = null;
 
@@ -53,29 +53,35 @@ export class App {
 		this.props = new Props(this.hf);
 		this.scene.add(this.props.group);
 
-		this.sim = new WaterSim(this.engine.renderer, this.hf, this.bedTexture, 20);
+		this.sim = new WaterSim(this.engine.renderer, this.hf, this.bedTexture, 20, {
+			macroSize: settings.macroSize,
+			microSize: settings.microSize,
+		});
 		this.sim.setWind(0.4, 2.75);
-		this.water = new WaterSurface(this.engine, this.sim, this.hf, { res: 256 });
+		this.water = new WaterSurface(this.engine, this.sim, this.hf, { res: settings.waterRes });
 		// SplashFX draws right after the water mesh, so it must live in the water
 		// scene: the water compositing pass paints over anything left in the main
 		// scene that sits above the surface.
-		this.splash = new SplashFX({ engine: this.engine, camera: this.engine.camera, renderer: this.engine.renderer });
+		this.splash = new SplashFX({ engine: this.engine, sim: this.sim, camera: this.engine.camera, renderer: this.engine.renderer });
 		this.water.scene.add(this.splash.group);
-		this.fish = new Fish(this.hf, this.sim, lowMode ? { koi: 4, minnow: 14 } : {});
+		this.fish = new Fish(this.hf, this.sim, lowMode ? { koi: 4, minnow: 14 } : this.quality.tier === 'medium' ? { koi: 5, minnow: 20 } : {});
 		this.scene.add(this.fish.group);
 		this.throwables = new Throwables(this.hf, this.sim, {
-			onSplash: (b, impact) => {
-				this.fish.startle(b.pos.x, b.pos.z, Math.min(2.6, 0.6 + impact * 3.2));
-				this.audio.splash(impact, b.pos.x, b.pos.z);
-				this.splash.splashAt(b.pos.x, b.pos.z, impact, { radius: b.cfg.radius, vy: b.vel.y });
-			},
+				onSplash: (b, impact, info = {}) => {
+					this.fish.startle(b.pos.x, b.pos.z, Math.min(2.6, 0.6 + impact * 3.2));
+					this.audio.splash(impact, b.pos.x, b.pos.z, info.type || b.type);
+					this.splash.splashAt(b.pos.x, b.pos.z, impact, {
+						type: info.type || b.type, radius: info.radius || b.cfg.radius,
+						vy: info.vy ?? b.vel.y, height: info.height,
+					});
+				},
 		});
 		this.scene.add(this.throwables.group);
 		this.food = new Food(this.hf, this.sim, this.fish);
 		this.scene.add(this.food.group);
 		this.audio = new PondAudio();
 		this.audioEnvT = 0;
-		const wakeAudio = () => this.audio.init();
+		const wakeAudio = () => { void this.audio.init(); };
 		window.addEventListener('pointerdown', wakeAudio, { once: true });
 		window.addEventListener('keydown', wakeAudio, { once: true });
 		const dbg = parseFloat(params.get('debug'));
@@ -107,12 +113,17 @@ export class App {
 		this.rainScene = new THREE.Scene();
 		this.rainScene.add(this.rainFx.group);
 		this.sky.onLightning = (delay, intensity) => this.audio.thunder(delay, intensity);
+		this._hidden = false;
+		this._qualityLast = performance.now();
+		this._qualityWarmup = 4;
 
 		this.sunScreen = new THREE.Vector2(0.5, 0.5);
 		this.sunVisible = 0;
 		this.onResize = this.onResize.bind(this);
 		this.onResize();
 		window.addEventListener('resize', this.onResize);
+		this.onVisibility = this.onVisibility.bind(this);
+		document.addEventListener('visibilitychange', this.onVisibility);
 
 		this.sky.setTime(18.8);
 		this.terrain.mesh.receiveShadow = true;
@@ -122,6 +133,7 @@ export class App {
 		}
 
 		this.setupInteraction(canvas);
+		this._applyQuality(this.qualitySettings, false);
 
 		this.fpsEl = document.getElementById('fps');
 		this.simEl = document.getElementById('simstat');
@@ -140,15 +152,11 @@ export class App {
 		}, 300);
 	}
 
-	pickQuality() {
-		const dpr = window.devicePixelRatio || 1;
-		return { scale: Math.min(1, 1.0 / Math.max(1, dpr * 0.7)) || 1, name: 'high' };
-	}
-
 	onResize() {
 		const w = window.innerWidth;
 		const h = window.innerHeight;
-		const dpr = Math.min(window.devicePixelRatio || 1, window.innerWidth < 900 ? 1.5 : 1.6) * this.quality.scale;
+		const settings = this.qualitySettings || QUALITY_PRESETS.high;
+		const dpr = Math.min(window.devicePixelRatio || 1, settings.maxDpr || 1.6) * (settings.scale || 1);
 		this.engine.resize(w, h, dpr);
 		if (this.water) {
 			const u = this.water.uniforms;
@@ -159,17 +167,103 @@ export class App {
 	setTime(hour) {
 		this.sky.setTime(hour);
 		this.sky.setWeather({ cloudCover: this.sky.cloudCover, rain: this.sky.rain });
+		const slider = document.getElementById('time-slider');
+		if (slider && document.activeElement !== slider) slider.value = String(hour);
+		const output = document.getElementById('time-out');
+		if (output) output.textContent = this.formatTime(hour);
 	}
 
 	setWind(strength, angle) {
 		this.sim.setWind(strength, angle);
 		this.sky.setWeather({ cloudCover: this.sky.cloudCover, rain: this.sky.rain });
+		const slider = document.getElementById('wind-slider');
+		if (slider && document.activeElement !== slider) slider.value = String(strength);
+		const output = document.getElementById('wind-out');
+		if (output) output.textContent = Math.round(strength * 100) + '%';
 	}
 
 	setRain(amount) {
 		this.sim.setRain(amount);
 		this.sky.rain = amount;
 		this.sky.setWeather({ cloudCover: Math.min(1, 0.35 + amount * 0.75), rain: amount });
+		const slider = document.getElementById('rain-slider');
+		if (slider && document.activeElement !== slider) slider.value = String(amount);
+		const output = document.getElementById('rain-out');
+		if (output) output.textContent = Math.round(amount * 100) + '%';
+	}
+
+	formatTime(hour) {
+		const h = ((Number(hour) % 24) + 24) % 24;
+		const hh = Math.floor(h);
+		const mm = Math.round((h - hh) * 60) % 60;
+		return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+	}
+
+	setHint(text) {
+		const hint = document.getElementById('hint');
+		if (hint) hint.textContent = text;
+	}
+
+	setPhotoMode(active) {
+		const enabled = !!active;
+		document.body.classList.toggle('photo', enabled);
+		const exit = document.getElementById('photo-exit');
+		if (exit) exit.classList.toggle('hidden', !enabled);
+		return enabled;
+	}
+
+	toggleMute() {
+		this.audio.setMuted(!this.audio.muted);
+		const button = document.getElementById('sound-btn');
+		if (button) {
+			button.setAttribute('aria-pressed', String(this.audio.muted));
+			button.setAttribute('aria-label', this.audio.muted ? 'Unmute sound' : 'Mute sound');
+			button.title = this.audio.muted ? 'Unmute sound (M)' : 'Mute sound (M)';
+			button.textContent = this.audio.muted ? '◑' : '◒';
+		}
+		return this.audio.muted;
+	}
+
+	toggleRain() {
+		this.setRain(this.sim.rain > 0.01 ? 0 : 0.72);
+		return this.sim.rain;
+	}
+
+	_applyQuality(settings, resize = true) {
+		this.qualitySettings = settings;
+		this.engine.setQuality(settings);
+		if (this.sim) this.sim.setResolution(settings.macroSize, settings.microSize);
+		if (this.water) this.water.setResolution(settings.waterRes);
+		if (this.terrain) this.terrain.setSimulationSize(settings.macroSize);
+		this.sky?.setQuality(settings);
+		this.landscape?.setQuality(settings);
+		this.vegetation?.setQuality(settings);
+		if (resize) this.onResize();
+		const select = document.getElementById('quality-select');
+		if (select && document.activeElement !== select) select.value = this.quality.mode === 'auto' ? 'auto' : this.quality.tier;
+		return settings;
+	}
+
+	setQuality(mode = 'auto') {
+		if (!['auto', 'low', 'medium', 'high'].includes(mode)) return this.qualitySettings;
+		this.quality.setMode(mode);
+		return this._applyQuality(this.quality.settings, true);
+	}
+
+	onVisibility() {
+		if (document.hidden) {
+			this._hidden = true;
+			this.cancelPointerInteraction();
+			this.sim.resetTiming();
+			this.quality.resetTiming();
+			void this.audio.suspend();
+			return;
+		}
+		this._hidden = false;
+		this.last = performance.now();
+		this.sim.resetTiming();
+		this.quality.resetTiming();
+		void this.audio.resume();
 	}
 
 	setupInteraction(canvas) {
@@ -180,11 +274,19 @@ export class App {
 		this.waterPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 		this.pointerWorld = new THREE.Vector3();
 		this.throwTarget = new THREE.Vector3();
+		this.throwOrigin = new THREE.Vector3();
+		this.throwVelocityScratch = new THREE.Vector3();
 		this.dragging = false;
 		this.dragLast = { x: 0, z: 0, t: 0 };
 		this.feeding = false;
 		this.feedTimer = 0;
 		this.pointerInside = false;
+		this.activePointers = new Map();
+		this.primaryPointerId = null;
+		this.multiTouch = false;
+		this.charging = false;
+		this.chargeStarted = 0;
+		this.charge = 0.25;
 
 		const pts = [];
 		for (let i = 0; i < 28; i++) pts.push(new THREE.Vector3());
@@ -198,24 +300,42 @@ export class App {
 		this.previewLine.renderOrder = 30;
 		this.previewLine.visible = false;
 		this.scene.add(this.previewLine);
+		this.targetMarker = new THREE.Mesh(
+			new THREE.RingGeometry(0.075, 0.095, 32),
+			new THREE.MeshBasicMaterial({ color: 0xffe6ad, transparent: true, opacity: 0.7, depthTest: false, fog: false, side: THREE.DoubleSide })
+		);
+		this.targetMarker.rotation.x = -Math.PI / 2;
+		this.targetMarker.renderOrder = 31;
+		this.targetMarker.visible = false;
+		this.water.scene.add(this.targetMarker);
 
 		const updatePointer = (e) => {
 			const rect = canvas.getBoundingClientRect();
+			if (!rect.width || !rect.height) return;
 			this.pointerNDC.set(
 				((e.clientX - rect.left) / rect.width) * 2 - 1,
 				-((e.clientY - rect.top) / rect.height) * 2 + 1
 			);
 			this.pointerInside = true;
+			this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
 		};
 		const waterHit = () => {
+			this.waterPlane.constant = -(this.sim?.levelOffset || 0);
 			this.raycaster.setFromCamera(this.pointerNDC, this.camera);
 			const hit = this.raycaster.ray.intersectPlane(this.waterPlane, this.pointerWorld);
-			return hit ? hit : null;
+			if (!hit || !this.hf.inPond(hit.x, hit.z)) return null;
+			const depth = this.sim?.surfaceAt(hit.x, hit.z)?.depth ?? -this.hf.height(hit.x, hit.z);
+			return Number.isFinite(depth) && depth > 0.01 ? hit : null;
 		};
+		this._waterHit = waterHit;
 
 		canvas.addEventListener('pointermove', (e) => {
 			updatePointer(e);
-			if (!this.dragging || this.mode !== 'touch') return;
+			if (this.charging && e.pointerId === this.primaryPointerId) {
+				const hit = waterHit();
+				if (hit) this.throwTarget.copy(hit);
+			}
+			if (!this.dragging || this.mode !== 'touch' || e.pointerId !== this.primaryPointerId || this.multiTouch) return;
 			const hit = waterHit();
 			if (!hit) return;
 			const now = performance.now();
@@ -224,23 +344,43 @@ export class App {
 			const dz = hit.z - this.dragLast.z;
 			const dist = Math.hypot(dx, dz);
 			if (dist > 0.02) {
-				this.stirAt(hit.x, hit.z, dx / dt, dz / dt, dist);
+				const count = Math.min(8, Math.max(1, Math.ceil(dist / 0.12)));
+				for (let i = 1; i <= count; i++) {
+					const t = i / count;
+					this.stirAt(this.dragLast.x + dx * t, this.dragLast.z + dz * t, dx / dt, dz / dt, dist / count);
+				}
 				this.dragLast.x = hit.x; this.dragLast.z = hit.z; this.dragLast.t = now;
 			}
 		});
 		canvas.addEventListener('pointerleave', () => {
 			this.pointerInside = false;
-			this.previewLine.visible = false;
+			if (!this.charging) {
+				this.previewLine.visible = false;
+				this.targetMarker.visible = false;
+			}
 		});
 		canvas.addEventListener('pointerdown', (e) => {
-			if (e.button !== 0) return;
+			if (e.pointerType === 'mouse' && e.button !== 0) return;
+			if (this.activePointers.size > 0 && !this.activePointers.has(e.pointerId)) {
+				this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
+				const primary = this.primaryPointerId;
+				this.cancelPointerInteraction({ clearPointers: false, release: false });
+				this.primaryPointerId = primary;
+				this.multiTouch = true;
+				return;
+			}
 			updatePointer(e);
 			this.controls.autoRotate = false;
 			this.userInteracted = true;
 			const hit = waterHit();
 			if (!hit) return;
+			this.primaryPointerId = e.pointerId;
+			try { canvas.setPointerCapture(e.pointerId); } catch { /* capture is unavailable in some test/device contexts */ }
 			if (this.mode === 'throw') {
-				this.throwAt(hit.x, hit.z);
+				this.charging = true;
+				this.chargeStarted = performance.now();
+				this.charge = 0.25;
+				this.throwTarget.copy(hit);
 			} else if (this.mode === 'touch') {
 				this.dragging = true;
 				this.dragLast = { x: hit.x, z: hit.z, t: performance.now() };
@@ -251,24 +391,65 @@ export class App {
 				this.feedTimer = 0.4;
 			}
 		});
-		const end = () => { this.dragging = false; this.feeding = false; };
-		canvas.addEventListener('pointerup', end);
-		canvas.addEventListener('pointercancel', end);
-		window.addEventListener('blur', end);
+		const finish = (e, cancelled = false) => {
+			const isPrimary = e.pointerId === this.primaryPointerId;
+			if (isPrimary && this.charging) {
+				if (!cancelled && !this.multiTouch) {
+					const hit = waterHit();
+					const target = hit || this.throwTarget;
+					this.throwAt(target.x, target.z, this.charge);
+				}
+				this.cancelPointerInteraction({ clearPointers: false, release: false });
+			}
+			if (isPrimary) {
+				this.dragging = false;
+				this.feeding = false;
+			}
+			this.activePointers.delete(e.pointerId);
+			if (this.activePointers.size === 0) {
+				this.multiTouch = false;
+				this.primaryPointerId = null;
+			}
+		};
+		canvas.addEventListener('pointerup', (e) => finish(e, false));
+		canvas.addEventListener('pointercancel', (e) => finish(e, true));
+		canvas.addEventListener('lostpointercapture', (e) => finish(e, true));
+		window.addEventListener('blur', () => this.cancelPointerInteraction());
+	}
+
+	cancelPointerInteraction({ clearPointers = true, release = true } = {}) {
+		if (release && this.primaryPointerId !== null) {
+			try { this.canvas.releasePointerCapture(this.primaryPointerId); } catch { /* already released */ }
+		}
+		this.charging = false;
+		this.dragging = false;
+		this.feeding = false;
+		this.charge = 0.25;
+		document.getElementById('custom-cursor')?.classList.remove('charge');
+		this.previewLine && (this.previewLine.visible = false);
+		this.targetMarker && (this.targetMarker.visible = false);
+		this.primaryPointerId = null;
+		this.multiTouch = false;
+		if (clearPointers) this.activePointers.clear();
 	}
 
 	setMode(mode) {
+		if (!['throw', 'touch', 'feed'].includes(mode)) return;
+		this.cancelPointerInteraction();
 		this.mode = mode;
-		this.dragging = false;
-		this.feeding = false;
-		if (mode !== 'throw') this.previewLine.visible = false;
+		const hints = {
+			throw: 'hold to charge · release to throw · right-drag to orbit',
+			touch: 'drag through the water · right-drag to orbit',
+			feed: 'tap or hold over the water · scatter food for the koi',
+		};
+		this.setHint(hints[mode]);
 	}
 
 	setThrowable(name) { this.selected = name; }
 
-	throwVelocity(target, out) {
-		const origin = this.camera.position.clone().addScaledVector(
-			this.camera.getWorldDirection(new THREE.Vector3()), 0.55
+	throwVelocity(target, out, charge = 0.25) {
+		const origin = this.throwOrigin.copy(this.camera.position).addScaledVector(
+			this.camera.getWorldDirection(this.throwVelocityScratch), 0.55
 		);
 		origin.y -= 0.1;
 		const dx = target.x - origin.x;
@@ -276,7 +457,7 @@ export class App {
 		const distXZ = Math.hypot(dx, dz);
 		const dy = target.y - origin.y;
 		const g = 9.81;
-		let speed = 6.0;
+		let speed = 5.4 + THREE.MathUtils.clamp(charge, 0.25, 1) * 2.8;
 		out.set(0, 0, 0);
 		for (let attempt = 0; attempt < 24; attempt++) {
 			const v2 = speed * speed;
@@ -290,18 +471,21 @@ export class App {
 			}
 			speed += 0.5;
 		}
+		if (out.lengthSq() < 1e-6) out.set(0, Math.max(1.2, speed * 0.35), 0);
 		return out;
 	}
 
-	throwAt(x, z) {
-		const origin = this.camera.position.clone().addScaledVector(
-			this.camera.getWorldDirection(new THREE.Vector3()), 0.55
+	throwAt(x, z, charge = 1) {
+		if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+		const origin = this.throwOrigin.copy(this.camera.position).addScaledVector(
+			this.camera.getWorldDirection(this.throwVelocityScratch), 0.55
 		);
 		origin.y -= 0.12;
-		const vel = this.throwVelocity(new THREE.Vector3(x, -0.02, z), new THREE.Vector3());
-		vel.x += (Math.random() - 0.5) * 0.22;
-		vel.z += (Math.random() - 0.5) * 0.22;
-		this.throwables.spawn(this.selected, origin, vel, 1.2);
+		const surface = this.sim.surfaceAt(x, z);
+		const targetY = Number.isFinite(surface?.height) ? surface.height : this.sim.levelOffset;
+		const target = new THREE.Vector3(x, targetY - 0.02, z);
+		const vel = this.throwVelocity(target, this.throwVelocityScratch, charge);
+		return this.throwables.spawn(this.selected, origin, vel, 1.2);
 	}
 
 	stirAt(x, z, vx, vz, dist) {
@@ -317,37 +501,38 @@ export class App {
 			microScale: 1.6,
 		});
 		this.fish.startle(x, z, Math.min(1.4, 0.3 + drag * 0.18));
-		this.audio.stir(drag);
+		this.audio.stir(drag, x, z);
 	}
 
 	feedAt(x, z) {
 		this.food.sprinkle(x, z, 7 + Math.floor(Math.random() * 5), 0.42);
 		this.fish.feed(x, z);
-		this.audio.plop();
-	}
-
-	toggleMute() {
-		this.audio.setMuted(!this.audio.muted);
+		this.audio.plop(x, z);
 	}
 
 	updateAimPreview() {
 		if (this.mode !== 'throw' || !this.pointerInside) {
 			this.previewLine.visible = false;
+			this.targetMarker.visible = false;
 			return;
 		}
-		this.raycaster.setFromCamera(this.pointerNDC, this.camera);
-		const hit = this.raycaster.ray.intersectPlane(this.waterPlane, this.pointerWorld);
-		if (!hit || !this.hf.inPond(hit.x, hit.z)) {
+		const hit = this._waterHit ? this._waterHit() : null;
+		if (!hit) {
 			this.previewLine.visible = false;
+			this.targetMarker.visible = false;
 			return;
 		}
 		const origin = this.camera.position.clone().addScaledVector(
 			this.camera.getWorldDirection(new THREE.Vector3()), 0.55
 		);
 		origin.y -= 0.12;
-		const vel = this.throwVelocity(new THREE.Vector3(hit.x, -0.02, hit.z), new THREE.Vector3());
+		const targetHeight = this.sim.surfaceAt(hit.x, hit.z)?.height ?? this.sim.levelOffset;
+		const target = new THREE.Vector3(hit.x, targetHeight - 0.02, hit.z);
+		const charge = this.charging ? this.charge : 0.25;
+		const vel = this.throwVelocity(target, new THREE.Vector3(), charge);
 		const g = 9.81;
 		const pts = this.previewPts;
+		const attr = this.previewGeo.attributes.position;
 		for (let i = 0; i < pts.length; i++) {
 			const t = (i / (pts.length - 1)) * 1.7;
 			pts[i].set(
@@ -355,10 +540,14 @@ export class App {
 				origin.y + vel.y * t - 0.5 * g * t * t,
 				origin.z + vel.z * t
 			);
+			attr.setXYZ(i, pts[i].x, pts[i].y, pts[i].z);
 		}
-		this.previewGeo.attributes.position.needsUpdate = true;
+		attr.needsUpdate = true;
 		this.previewGeo.computeBoundingSphere();
 		this.previewLine.visible = true;
+		this.targetMarker.position.set(hit.x, targetHeight + 0.012, hit.z);
+		this.targetMarker.scale.setScalar(0.9 + charge * 0.35);
+		this.targetMarker.visible = true;
 	}
 
 	updateFeedHold(dt) {
@@ -366,9 +555,19 @@ export class App {
 		this.feedTimer -= dt;
 		if (this.feedTimer > 0) return;
 		this.feedTimer = 0.5;
-		this.raycaster.setFromCamera(this.pointerNDC, this.camera);
-		const hit = this.raycaster.ray.intersectPlane(this.waterPlane, this.pointerWorld);
+		const hit = this._waterHit ? this._waterHit() : null;
 		if (hit) this.feedAt(hit.x, hit.z);
+	}
+
+	updateChargeState() {
+		if (!this.charging) return;
+		const elapsed = Math.max(0, (performance.now() - this.chargeStarted) / 1000);
+		this.charge = THREE.MathUtils.clamp(0.25 + elapsed * 0.72, 0.25, 1);
+		const cursor = document.getElementById('custom-cursor');
+		if (cursor) {
+			cursor.classList.add('charge');
+			cursor.style.setProperty('--charge', String(this.charge));
+		}
 	}
 
 	updateSunScreen() {
@@ -385,10 +584,15 @@ export class App {
 
 	loop(now) {
 		this._raf = requestAnimationFrame(this.loop);
+		if (this._hidden) {
+			this.last = now;
+			return;
+		}
 		const dt = Math.min((now - this.last) / 1000, 0.05);
 		this.last = now;
 		this.time += dt;
 		this.frame++;
+		this.engine.beginFrame();
 
 		this.controls.update(dt);
 		// keep the camera from dipping below the water surface
@@ -402,10 +606,10 @@ export class App {
 		this.landscape.windUniforms.uWindTime.value = this.time;
 		this.landscape.windUniforms.uWindPower.value = this.sim.windStrength;
 		this.landscape.windUniforms.uWindDir.value.copy(this.sim.wind);
-		this.water.update(this.time, this.sky.state);
-		this.props.update(dt, this.time, this.sim);
-		this.fish.update(dt, this.time);
 		this.throwables.update(dt, this.time);
+		this.fish.update(dt, this.time);
+		this.props.update(dt, this.time, this.sim);
+		this.water.update(this.time, this.sky.state);
 		this.splash.update(dt, this.time);
 		this.food.update(dt, this.time);
 		this.rainFx.update(dt, this.time, {
@@ -416,7 +620,9 @@ export class App {
 			flash: this.sky.uniforms.uFlash.value,
 		});
 		this.updateFeedHold(dt);
+		this.updateChargeState();
 		this.updateAimPreview();
+		this.audio.setListener(this.camera);
 		this.audioEnvT -= dt;
 		if (this.audioEnvT <= 0) {
 			this.audioEnvT = 0.5;
@@ -435,6 +641,7 @@ export class App {
 		this.engine.finalMat.uniforms.uSunVisible.value = this.sunVisible;
 		this.engine.finalMat.uniforms.uExposure.value = 1.06 - this.sky.storm * 0.20;
 		this.engine.post(this.time, this.sunScreen);
+		this.engine.endFrame();
 
 		this.frames++;
 		const nowMs = performance.now();
@@ -445,22 +652,38 @@ export class App {
 			this.fpsStart = nowMs;
 			if (this.fpsEl) this.fpsEl.textContent = Math.round(fps);
 			if (this.simEl) this.simEl.textContent = `sim ${this.sim.macroSize}² · ${this.sim.microSize}² · rb ${this.sim.readbackCount}`;
+			if (this.quality.mode === 'auto' && this.quality.update(this.fpsSmooth, (nowMs - this._qualityLast) / 1000)) {
+				this._applyQuality(this.quality.settings, true);
+			}
+			this._qualityLast = nowMs;
 		}
 	}
 
 	getStats() {
+		const frameStats = this.engine.frameStats || {};
+		const diagnostics = this.sim.getDiagnostics ? this.sim.getDiagnostics() : {};
 		return {
 			fps: this.fpsSmooth,
 			readback: this.sim.readbackCount,
 			hasReadback: this.sim.hasReadback,
 			steps: this.sim.totalSteps,
 			type: String(this.sim.stateType),
-			triangles: this.engine.renderer.info.render.triangles,
-			calls: this.engine.renderer.info.render.calls,
+			triangles: frameStats.triangles ?? this.engine.renderer.info.render.triangles,
+			calls: frameStats.calls ?? this.engine.renderer.info.render.calls,
 			fish: this.fish.fish.length,
 			bodies: this.throwables.bodies.length,
 			pellets: this.food.pellets.length,
 			mode: this.mode,
+			quality: this.quality.tier,
+			qualityMode: this.quality.mode === 'auto' ? 'auto' : 'manual',
+			macroSize: this.sim.macroSize,
+			microSize: this.sim.microSize,
+			waterRes: this.water.res,
+			readbackLatency: Number.isFinite(this.sim.readbackLatency) ? this.sim.readbackLatency : 0,
+			timings: frameStats.timings || this.engine.timings,
+			gpuTimings: frameStats.gpuTimings || this.engine.gpuTimings,
+			frameStats,
+			diagnostics,
 		};
 	}
 }

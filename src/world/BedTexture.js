@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-export function createBedTexture(hf, size = 512, domain = 20) {
+export function createBedTexture(hf, size = 512, domain = 20, renderer = null) {
 	const half = domain * 0.5;
 	const data = new Float32Array(size * size * 4);
 	for (let j = 0; j < size; j++) {
@@ -16,8 +16,12 @@ export function createBedTexture(hf, size = 512, domain = 20) {
 		}
 	}
 	const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.FloatType);
-	tex.minFilter = THREE.LinearFilter;
-	tex.magFilter = THREE.LinearFilter;
+	// Float sampling is core in WebGL 2; FloatType *linear* sampling is not.
+	// Safe before Engine exists, and WaterSim can enable it after capability probing.
+	const glRenderer = renderer?.renderer || renderer;
+	const filter = glRenderer?.extensions?.has?.('OES_texture_float_linear') ? THREE.LinearFilter : THREE.NearestFilter;
+	tex.minFilter = filter;
+	tex.magFilter = filter;
 	tex.wrapS = THREE.ClampToEdgeWrapping;
 	tex.wrapT = THREE.ClampToEdgeWrapping;
 	tex.generateMipmaps = false;

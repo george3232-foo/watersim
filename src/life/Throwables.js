@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { mulberry32, clamp, TAU } from '../core/Noise.js';
+import { surfaceHeight, waterColumn } from './WaterCoupling.js';
 
 // Throwable objects with two-way water coupling. Physics is simple but uses
 // real units: buoyancy from the submerged fraction of the displaced volume,
@@ -7,6 +8,8 @@ import { mulberry32, clamp, TAU } from '../core/Noise.js';
 
 const G = 9.81;
 const RHO_W = 1000;
+export const THROWABLE_FIXED_DT = 1 / 120;
+export const THROWABLE_MAX_SUBSTEPS = 12;
 
 function makeBodyGeometry(type, rand) {
 	const parts = [];
@@ -136,10 +139,28 @@ export class Throwables {
 		this.group.name = 'throwables';
 		this.bodies = [];
 		this.splashHook = opts.onSplash || null;
-		this.capacity = opts.capacity ?? 12;
+		this.capacity = Number.isFinite(opts.capacity) ? clamp(Math.floor(opts.capacity), 1, 256) : 12;
+		this.fixedDt = THROWABLE_FIXED_DT;
+		this.maxSubsteps = THROWABLE_MAX_SUBSTEPS;
+		this.accumulator = 0;
+		this.metrics = { steps: 0, totalSteps: 0, droppedTime: 0, displacedVolume: 0 };
+		this._slots = {};
+		this._surface = { height: 0, depth: 0, bed: 0 };
+		this._slopeSample = { height: 0, depth: 0 };
+		this._slope = new THREE.Vector2();
+		this._normal = new THREE.Vector3();
+		this._up = new THREE.Vector3();
+		this._align = new THREE.Vector3();
+		this._axis = new THREE.Vector3();
+		this._deltaQuat = new THREE.Quaternion();
+		this._matrix = new THREE.Matrix4();
+		this._scale = new THREE.Vector3(1, 1, 1);
+		this._zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+		this._types = Object.keys(TYPES);
 
 		this.meshes = {};
-		for (const name of Object.keys(TYPES)) {
+		for (const name of this._types) {
+			this._slots[name] = new Array(this.capacity).fill(null);
 			const cfg = TYPES[name];
 			const geo = makeBodyGeometry(name, mulberry32(97 + name.length * 13));
 			const mat = new THREE.MeshStandardMaterial({
@@ -160,30 +181,37 @@ export class Throwables {
 	}
 
 	freeSlot(name) {
-		const used = new Set(this.bodies.filter((b) => b.type === name).map((b) => b.slot));
-		for (let i = 0; i < this.capacity; i++) if (!used.has(i)) return i;
-		// recycle the oldest
-		const oldest = this.bodies.filter((b) => b.type === name).sort((a, b) => a.born - b.born)[0];
-		if (oldest) return oldest.slot;
-		return 0;
+		const slots = this._slots[name];
+		let oldest = slots[0];
+		for (let i = 0; i < this.capacity; i++) {
+			if (!slots[i]) return i;
+			if (slots[i].born < oldest.born) oldest = slots[i];
+		}
+		return oldest.slot;
 	}
 
 	spawn(typeName, pos, vel, spin = 0.5) {
 		const cfg = TYPES[typeName];
-		if (!cfg) return null;
+		if (!cfg || !pos || !vel || ![pos.x, pos.y, pos.z, vel.x, vel.y, vel.z].every(Number.isFinite)) return null;
+		spin = Number.isFinite(spin) ? clamp(spin, 0, 8) : 0.5;
 		const rand = this.rand;
 		const slot = this.freeSlot(typeName);
 		// kick out any previous occupant of the slot
-		const prevIdx = this.bodies.findIndex((b) => b.type === typeName && b.slot === slot);
-		if (prevIdx >= 0) this.bodies.splice(prevIdx, 1);
+		const previous = this._slots[typeName][slot];
+		if (previous) this.removeBody(previous);
+		const volume = Math.PI * cfg.radius * cfg.radius * cfg.height * (typeName === 'pebble' ? 0.55 : 0.62);
 
 		const b = {
 			type: typeName, cfg, slot,
+			volume, mass: cfg.density * RHO_W * volume,
 			pos: pos.clone(),
 			vel: vel.clone(),
 			quat: new THREE.Quaternion().setFromEuler(new THREE.Euler(rand() * TAU, rand() * TAU, rand() * TAU)),
 			angVel: new THREE.Vector3((rand() - 0.5) * 4 * spin, (rand() - 0.5) * 4 * spin, (rand() - 0.5) * 4 * spin),
 			submerged: 0,
+			surfaceHeight: 0,
+			entryVy: 0,
+			impactVy: 0,
 			cool: 0,
 			rippleT: rand() * 0.3,
 			awake: true,
@@ -191,68 +219,81 @@ export class Throwables {
 			rest: 0,
 		};
 		this.bodies.push(b);
+		this._slots[typeName][slot] = b;
 		return b;
 	}
 
 	removeBody(b) {
 		const i = this.bodies.indexOf(b);
 		if (i >= 0) this.bodies.splice(i, 1);
+		if (this._slots[b.type][b.slot] === b) this._slots[b.type][b.slot] = null;
 	}
 
 	update(dt, time) {
-		if (dt <= 0) return;
+		if (!Number.isFinite(dt) || dt <= 0) return;
+		const budget = this.fixedDt * this.maxSubsteps;
+		const pending = this.accumulator + dt;
+		this.accumulator = Math.min(pending, budget);
+		this.metrics.droppedTime += Math.max(0, pending - budget);
+		let steps = 0;
+		while (this.accumulator + 1e-10 >= this.fixedDt && steps < this.maxSubsteps) {
+			this._fixedStep(this.fixedDt);
+			this.accumulator = Math.max(0, this.accumulator - this.fixedDt);
+			steps++;
+		}
+		this.metrics.steps = steps;
+		this.metrics.totalSteps += steps;
+
+		// Report once per render frame, even if it contained no fixed step. This
+		// is volume in m³, not mass or an extra impulse in the gradient solver.
+		let displacedVolume = 0;
+		for (const b of this.bodies) {
+			waterColumn(this.hf, this.sim, b.pos.x, b.pos.z, this._surface);
+			b.surfaceHeight = this._surface.height;
+			b.submerged = this._submerged(b, this._surface);
+			displacedVolume += b.volume * b.submerged;
+		}
+		this.metrics.displacedVolume = displacedVolume;
+		if (this.sim.setDisplacedVolume) this.sim.setDisplacedVolume(displacedVolume, dt);
+		this._writeMatrices();
+	}
+
+	_submerged(b, surf) {
+		if (surf.depth <= 0.02) return 0;
+		const bottom = Math.max(surf.bed, b.pos.y - b.cfg.height * 0.5);
+		return clamp((Math.min(surf.height, b.pos.y + b.cfg.height * 0.5) - bottom) / b.cfg.height, 0, 1);
+	}
+
+	_sampleSlope(x, z) {
+		const eps = 0.25;
+		const out = this._slopeSample;
+		const hx = surfaceHeight(this.sim, x + eps, z, out) - surfaceHeight(this.sim, x - eps, z, out);
+		const hz = surfaceHeight(this.sim, x, z + eps, out) - surfaceHeight(this.sim, x, z - eps, out);
+		// Readback noise/shore discontinuities must not create unbounded flow.
+		this._slope.set(clamp(hx / (2 * eps), -0.75, 0.75), clamp(hz / (2 * eps), -0.75, 0.75));
+		return this._slope;
+	}
+
+	_fixedStep(dt) {
 		const hf = this.hf;
 		const sim = this.sim;
-		const up = new THREE.Vector3(0, 1, 0);
-		const tmp = new THREE.Vector3();
-		const surf = { height: 0, depth: 0 };
+		const surf = this._surface;
 
 		for (let bi = this.bodies.length - 1; bi >= 0; bi--) {
 			const b = this.bodies[bi];
 			const cfg = b.cfg;
 
-			// out of play: drifted far away or too old
-			if (Math.hypot(b.pos.x, b.pos.z) > 16 || b.pos.y < -2.4) {
+			if (!Number.isFinite(b.pos.lengthSq() + b.vel.lengthSq() + b.angVel.lengthSq() + b.quat.lengthSq()) || Math.hypot(b.pos.x, b.pos.z) > 16 || b.pos.y < -2.4) {
 				this.removeBody(b);
 				continue;
 			}
 
-			sim.sampleSurface(b.pos.x, b.pos.z, surf);
-			const eta = surf.height;
-			const bed = hf.height(b.pos.x, b.pos.z);
+			waterColumn(hf, sim, b.pos.x, b.pos.z, surf);
 			const halfH = cfg.height * 0.5;
-			const bottom = b.pos.y - halfH;
-			const topY = b.pos.y + halfH;
-			// there is a water column here only inside the pond
-			const hasWater = (eta - bed) > 0.02;
-
-			// submerged fraction of the object's volume (flat-plate approximation)
-			let sub = 0;
-			if (hasWater && eta > bottom) {
-				sub = clamp((Math.min(eta, topY) - bottom) / cfg.height, 0, 1);
-			}
-			const wasSub = b.submerged;
-			b.submerged = sub;
-
-			// splash on entry
-			const volume = (Math.PI * cfg.radius * cfg.radius * cfg.height) * (b.type === 'pebble' ? 0.55 : 0.62);
-			const mass = cfg.density * RHO_W * volume;
-			if (wasSub < 0.12 && sub > 0.25 && b.vel.y < -0.35) {
-				const impact = clamp(mass * -b.vel.y * 0.35, 0.002, 0.5);
-				const amp = -clamp(0.012 + impact * 0.30, 0, 0.14);
-				sim.addImpulse({
-					x: b.pos.x, z: b.pos.z,
-					radius: cfg.radius * 3.4 + 0.05,
-					amp,
-					flowX: b.vel.x * 0.4, flowZ: b.vel.z * 0.4,
-					flowStrength: clamp(impact * 1.4, 0, 0.5),
-					foam: clamp(0.12 + impact * 0.9, 0, 0.7),
-					microScale: 1.7,
-				});
-				if (this.splashHook) this.splashHook(b, impact);
-			}
-
-			const inWater = sub > 0.02;
+			const sub = this._submerged(b, surf);
+			const entryVy = b.vel.y;
+			b.cool = Math.max(0, b.cool - dt);
+			const { volume, mass } = b;
 
 			// gravity + Archimedes buoyancy
 			let fy = -mass * G;
@@ -262,8 +303,8 @@ export class Throwables {
 			// Quadratic drag integrated implicitly. Explicit Euler here is
 			// unstable for light floaters: at 20 fps a fast entry can reverse
 			// the velocity in a single step and launch a duck out of the pond.
-			const slope = sim.slopeAt(b.pos.x, b.pos.z, 0.3);
-			const flowX = -slope.x * 1.2, flowZ = -slope.z * 1.2;
+			const slope = this._sampleSlope(b.pos.x, b.pos.z);
+			const flowX = sub > 0 ? -slope.x * 1.2 : 0, flowZ = sub > 0 ? -slope.y * 1.2 : 0;
 			const rvx = b.vel.x - flowX, rvz = b.vel.z - flowZ, rvy = b.vel.y;
 			const relV = Math.hypot(rvx, rvy, rvz);
 			// hydrodynamic drag only acts on the submerged part; in air keep a
@@ -271,7 +312,9 @@ export class Throwables {
 			const immersedArea = Math.PI * cfg.radius * cfg.radius * sub * 2.2;
 			const airArea = Math.PI * cfg.radius * cfg.radius;
 			const dragCoef = 0.5 * (RHO_W * cfg.drag * immersedArea + 1.2 * 0.47 * airArea);
-			const damp = 1 / (1 + (dragCoef / mass) * relV * dt);
+			// A small implicit viscous term damps the final bob instead of letting
+			// quadratic drag approach zero at equilibrium indefinitely.
+			const damp = 1 / (1 + ((dragCoef / mass) * relV + 1.6 * sub / cfg.density) * dt);
 			b.vel.x = flowX + rvx * damp;
 			b.vel.y = rvy * damp;
 			b.vel.z = flowZ + rvz * damp;
@@ -282,7 +325,8 @@ export class Throwables {
 			b.pos.z += b.vel.z * dt;
 
 			// ground/bed collision: this covers both the pond bed and the bank
-			const restY = bed + halfH * 0.62;
+			waterColumn(hf, sim, b.pos.x, b.pos.z, surf);
+			const restY = surf.bed + halfH;
 			if (b.pos.y < restY) {
 				b.pos.y = restY;
 				if (b.vel.y < 0) {
@@ -293,18 +337,51 @@ export class Throwables {
 				b.angVel.multiplyScalar(Math.exp(-3.0 * dt));
 			}
 
-			// sloshing / float torque: bodies align their local up with world up
-			if (sub > 0.15 && cfg.density < 1.0) {
-				tmp.set(0, 1, 0).applyQuaternion(b.quat);
-				const align = new THREE.Vector3().crossVectors(tmp, up).multiplyScalar(cfg.floatTorque * sub);
-				b.angVel.addScaledVector(align, dt * 9.0);
+			const nextSub = this._submerged(b, surf);
+			b.surfaceHeight = surf.height;
+			b.submerged = nextSub;
+			// Detect first contact after moving, including a thin leaf crossing
+			// the surface in one step. The existing two-argument hook is retained.
+			if (sub <= 0.02 && nextSub > 0.02 && entryVy < -0.35 && b.cool <= 0) {
+				b.entryVy = entryVy;
+				b.impactVy = entryVy;
+				b.cool = 0.18;
+				const impact = clamp(mass * -entryVy * 0.35, 0.002, 0.5);
+				const softness = b.type === 'leaf' ? 0.15 : (cfg.density < 1 ? 0.65 : 1);
+				sim.addImpulse({
+					x: b.pos.x, z: b.pos.z,
+					radius: cfg.radius * (b.type === 'stone' ? 3.8 : 3.0) + 0.04,
+					amp: -Math.min(0.14, 0.012 + impact * 0.30) * softness,
+					flowX: b.vel.x * 0.4, flowZ: b.vel.z * 0.4,
+					flowStrength: clamp(impact * 1.4, 0, 0.5) * softness,
+					foam: clamp(0.12 + impact * 0.9, 0, 0.7) * softness,
+					microScale: b.type === 'leaf' ? 0.7 : 1.7,
+				});
+				if (this.splashHook) this.splashHook(b, impact, {
+					type: b.type, radius: cfg.radius, vy: entryVy, height: surf.height,
+				});
+			}
+
+			// Align local up with the sampled water normal. Angle-axis feedback
+			// also rights an upside-down floater; torque and spin are bounded.
+			if (nextSub > 0.02 && cfg.density < 1.0) {
+				const localSlope = this._sampleSlope(b.pos.x, b.pos.z);
+				const normal = this._normal.set(-localSlope.x, 1, -localSlope.y).normalize();
+				const up = this._up.set(0, 1, 0).applyQuaternion(b.quat);
+				const align = this._align.crossVectors(up, normal);
+				const sine = align.length();
+				const cosine = clamp(up.dot(normal), -1, 1);
+				if (sine > 1e-6) align.multiplyScalar(Math.atan2(sine, cosine) / sine);
+				else align.set(cosine < 0 ? Math.PI : 0, 0, 0);
+				align.multiplyScalar(cfg.floatTorque * nextSub * 9).clampLength(0, 12);
+				b.angVel.addScaledVector(align, dt);
 			}
 
 			// air/water angular damping
-			b.angVel.multiplyScalar(Math.exp(-(inWater ? 2.6 : 0.35) * dt));
+			b.angVel.multiplyScalar(Math.exp(-(nextSub > 0.02 ? 2.6 : 0.35) * dt)).clampLength(0, 12);
 
 			// small tangential ripple while adrift on the surface
-			if (sub > 0.2 && sub < 0.9) {
+			if (nextSub > 0.2 && nextSub < 0.9) {
 				b.rippleT -= dt;
 				const sp = Math.hypot(b.vel.x, b.vel.z);
 				if (b.rippleT <= 0 && sp > 0.05) {
@@ -312,7 +389,7 @@ export class Throwables {
 					sim.addImpulse({
 						x: b.pos.x, z: b.pos.z,
 						radius: cfg.radius * 2.2 + 0.04,
-						amp: -0.0028 * (0.5 + sp),
+						amp: -0.0028 * (0.5 + Math.min(sp, 2)),
 						foam: 0.0,
 						microScale: 1.2,
 					});
@@ -322,38 +399,32 @@ export class Throwables {
 			// integrate rotation
 			if (b.angVel.lengthSq() > 1e-6) {
 				const ang = b.angVel.length() * dt;
-				tmp.copy(b.angVel).normalize();
-				const dq = new THREE.Quaternion().setFromAxisAngle(tmp, ang);
-				b.quat.premultiply(dq).normalize();
+				this._axis.copy(b.angVel).normalize();
+				this._deltaQuat.setFromAxisAngle(this._axis, ang);
+				b.quat.premultiply(this._deltaQuat).normalize();
 			}
 
 			// wind nudge for the leaf
-			if (b.type === 'leaf' && sub > 0.3) {
-				b.vel.x += sim.wind.x * sim.windStrength * 0.6 * dt;
-				b.vel.z += sim.wind.y * sim.windStrength * 0.6 * dt;
+			if (b.type === 'leaf' && nextSub > 0) {
+				const strength = Number.isFinite(sim.windStrength) ? clamp(sim.windStrength, 0, 1) : 0;
+				b.vel.x += (Number.isFinite(sim.wind?.x) ? sim.wind.x : 0) * strength * 0.6 * dt;
+				b.vel.z += (Number.isFinite(sim.wind?.y) ? sim.wind.y : 0) * strength * 0.6 * dt;
 			}
 		}
+	}
 
-		// write matrices
-		const m = new THREE.Matrix4();
-		const sc = new THREE.Vector3();
-		for (const name of Object.keys(this.meshes)) {
+	_writeMatrices() {
+		const m = this._matrix;
+		for (const name of this._types) {
 			const mesh = this.meshes[name];
-			let dirty = false;
-			const used = this.bodies.filter((b) => b.type === name);
-			const zeros = new THREE.Matrix4().makeScale(0, 0, 0);
+			const slots = this._slots[name];
 			for (let i = 0; i < this.capacity; i++) {
-				const b = used.find((x) => x.slot === i);
-				if (b) {
-					sc.set(1, 1, 1);
-					m.compose(b.pos, b.quat, sc);
-				} else {
-					m.copy(zeros);
-				}
+				const b = slots[i];
+				if (b) m.compose(b.pos, b.quat, this._scale);
+				else m.copy(this._zeroMatrix);
 				mesh.setMatrixAt(i, m);
-				dirty = true;
 			}
-			if (dirty) mesh.instanceMatrix.needsUpdate = true;
+			mesh.instanceMatrix.needsUpdate = true;
 		}
 	}
 }

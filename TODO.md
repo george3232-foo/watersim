@@ -12,7 +12,7 @@
 - [x] Displacement / foam field
 - [x] Async CPU readback of height + velocity for buoyancy
 - [x] Water surface rendering: refraction, planar reflections, Fresnel, absorption, foam
-- [ ] Caustics projected on bed and underwater objects — tuning brightness
+- [x] Caustics projected on bed and underwater objects — tuning brightness
 
 ## World & rendering
 - [x] Procedural pond terrain, bed, shoreline base shader
@@ -21,7 +21,7 @@
 - [x] Instanced grass, wildflowers, reeds shoreline planting
 - [x] Trees + framing foreground silhouettes
 - [x] Jetty, lantern, lily pads, driftwood, shoreline rocks
-- [ ] Golden-hour palette, exposure and water optics calibration
+- [x] Golden-hour palette, exposure and water optics calibration
 - [x] Postprocessing: HDR bloom, ACES, grade, vignette, grain, FXAA
 
 ## Life & interaction
@@ -29,21 +29,21 @@
 - [x] Fish boids AI: wander, shoal, avoid, startle, feed, surface
 - [x] Fish ripples and reaction to player
 - [x] Rigid bodies: pebbles, stone, apple, duck, ball, leaf; buoyancy, drag, ground/bed rest
-- [ ] Splash droplets, bubbles, rain splash particles (ripples exist)
+- [x] Splash droplets, bubbles, rain splash particles (ripples exist)
 - [x] Throw/stir/feed interaction modes + trajectory preview
 - [x] Procedural audio: ambience, splashes, stir, fish plops, birds/frogs
 - [x] UI: title, toolbar, sliders, help, stats, loading
 
 ## Milestones
-- [ ] M1 — believable still frame: sky, landscape, trees, vegetation, water optics (props in; tuning)
-- [ ] M2 — koi + food + startle behaviour (implemented; visual verification in progress)
-- [ ] M3 — throwable rigid bodies with two-way buoyancy (implemented; verification in progress)
-- [ ] M4 — touch/stir, splashes, rain, audio (implemented; verifying)
-- [ ] M5 — presets, quality scaling, final verification
+- [x] M1 — believable still frame: sky, landscape, trees, vegetation, water optics
+- [x] M2 — koi + food + startle behaviour
+- [x] M3 — throwable rigid bodies with two-way buoyancy
+- [x] M4 — touch/stir, splashes, rain, audio
+- [x] M5 — presets, quality scaling, final verification
 
 ## Verification
 - [x] Browser test with Playwright, console clean (verify + interaction harness)
-- [ ] Interaction test: throw/stir/feed counts + screenshots
-- [ ] Screenshots across presets/time of day
-- [ ] Physical behavior sanity checks
-- [ ] README + final polish
+- [x] Interaction test: throw/stir/feed counts + screenshots
+- [x] Screenshots across presets/time of day
+- [x] Physical behavior sanity checks
+- [x] README + final polish

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { Noise2D, mulberry32, smoothstep, lerp, TAU, clamp } from '../core/Noise.js';
+import { Noise2D, mulberry32, smoothstep, lerp, TAU, clamp, hash2 } from '../core/Noise.js';
 import { createFoliageTexture } from './FoliageTexture.js';
 
 const INNER_RADIUS = 16.95;
@@ -17,8 +17,11 @@ export class Landscape {
 		this.noise = new Noise2D(777);
 		this.noise2 = new Noise2D(1729);
 		this.sunHour = 18.8;
+		this.foliage = 1;
 		this.group = new THREE.Group();
 		this.group.name = 'landscape';
+		this.treeMeshes = [];
+		this.foliage = 1;
 		this.windUniforms = {
 			uWindTime: { value: 0 },
 			uWindPower: { value: 0.4 },
@@ -178,13 +181,28 @@ gl_Position = projectionMatrix * mvPosition;
 		return geo;
 	}
 
-	// Crown dimensions shared by the blob canopy and the leaf-card shell. The
-	// cards sit on a slightly expanded ellipsoid so they overlay the visible
-	// surface of the blobs rather than being swallowed by them.
-	crownShape(large = false) {
-		return large
-			? { rx: 2.0, ry: 1.45, rz: 1.75, cy: 4.0, blobs: 30, inner: 7 }
-			: { rx: 1.7, ry: 1.25, rz: 1.5, cy: 3.8, blobs: 20, inner: 5 };
+	// Seeded proportions and a slight sweep break the spherical crown outline.
+	// Exact clump dimensions are also used to anchor the leaf-card skin.
+	crownShape(large = false, seed = 1) {
+		const rand = mulberry32(seed ^ 0x5f3759df);
+		return {
+			rx: (large ? 2.0 : 1.7) * (0.93 + rand() * 0.16),
+			ry: (large ? 1.45 : 1.25) * (0.92 + rand() * 0.20),
+			rz: (large ? 1.75 : 1.5) * (0.90 + rand() * 0.20),
+			cy: (large ? 4.0 : 3.8) + (rand() - 0.5) * 0.24,
+			cx: (rand() - 0.5) * 0.34, cz: (rand() - 0.5) * 0.34,
+			leanX: (rand() - 0.5) * 0.65, leanZ: (rand() - 0.5) * 0.55,
+			phase: rand() * TAU,
+			blobs: large ? 28 : 20, inner: large ? 6 : 5,
+		};
+	}
+
+	setTreeProportions(t, hero = false) {
+		const x = Math.round(t.x * 64), z = Math.round(t.z * 64);
+		const spread = hero ? 0.16 : 0.30;
+		t.scaleX = t.scale * (1 - spread * 0.5 + hash2(x, z) * spread);
+		t.scaleY = t.scale * (0.90 + hash2(x + 137, z - 71) * 0.20);
+		t.scaleZ = t.scale * (1 - spread * 0.5 + hash2(x - 43, z + 239) * spread);
 	}
 
 	broadleafGeometry(seed = 1, large = false) {
@@ -207,14 +225,14 @@ gl_Position = projectionMatrix * mvPosition;
 		}
 
 		const greens = [
-			new THREE.Color(0x365323),
-			new THREE.Color(0x425f28),
-			new THREE.Color(0x4f702e),
-			new THREE.Color(0x5c7d34),
+			new THREE.Color(0x3d5131),
+			new THREE.Color(0x4b6039),
+			new THREE.Color(0x566c40),
+			new THREE.Color(0x63764a),
 		];
-		// canopy: blobs clustered on an ellipsoid shell so the crown reads as
-		// one lumpy mass instead of a pile of balls
-		const shape = this.crownShape(large);
+		// Smaller, flattened, overlapping clumps leave an irregular branch-led
+		// outline. Fewer clumps than before keep the geometry budget bounded.
+		const shape = this.crownShape(large, seed);
 		const { rx, ry, rz, cy, blobs } = shape;
 		const outerBlobs = [];
 		for (let i = 0; i < blobs; i++) {
@@ -224,11 +242,14 @@ gl_Position = projectionMatrix * mvPosition;
 			const sx = Math.sin(phi) * Math.cos(theta);
 			const sy = Math.cos(phi);
 			const sz = Math.sin(phi) * Math.sin(theta);
-			const shell = 0.68 + rand() * 0.34;
-			const bx = sx * rx * shell;
-			const by = cy + sy * ry * shell;
-			const bz = sz * rz * shell;
-			const s = (large ? 0.56 : 0.49) + rand() * 0.58;
+			const shell = 0.65 + rand() * 0.22 + Math.sin(theta * 2 + shape.phase) * 0.08;
+			const bx = shape.cx + sx * rx * shell + sy * shape.leanX;
+			const by = cy + sy * ry * shell + Math.sin(theta * 3 + shape.phase) * 0.14;
+			const bz = shape.cz + sz * rz * shell + sy * shape.leanZ;
+			const s = (large ? 0.46 : 0.39) + rand() * 0.38;
+			const ax = 0.85 + rand() * 0.35;
+			const ay = 0.62 + rand() * 0.32;
+			const az = 0.80 + rand() * 0.42;
 			const blob = new THREE.IcosahedronGeometry(s, 1);
 			const p = blob.attributes.position;
 			// IcosahedronGeometry is non-indexed, so the same corner position is
@@ -243,30 +264,33 @@ gl_Position = projectionMatrix * mvPosition;
 				const key = `${ox.toFixed(4)},${oy.toFixed(4)},${oz.toFixed(4)}`;
 				let puff = puffs.get(key);
 				if (puff === undefined) {
-					puff = 0.8 + rand() * 0.4;
+					puff = 0.94 + rand() * 0.12;
 					puffs.set(key, puff);
 				}
-				p.setXYZ(kk2, ox * puff, oy * puff * 0.85, oz * puff);
+				p.setXYZ(kk2, ox * puff, oy * puff, oz * puff);
 			}
 			// Keep the icosahedron's smooth radial normals; recomputing them
 			// here would flat-shade every triangle and turn the crown into a
 			// pile of hard facets for the leaf cards to fight with.
+			blob.scale(ax, ay, az);
 			blob.translate(bx, by, bz);
-			outerBlobs.push({ x: bx, y: by, z: bz, r: s });
+			outerBlobs.push({ x: bx, y: by, z: bz, r: s, rx: s * ax, ry: s * ay, rz: s * az });
 			const base = greens[(rand() * greens.length) | 0];
 			parts.push(this.paint(blob, base, 0.2, rand, 0.55));
 		}
 		// a few softer inner clumps to close the gaps
 		for (let i = 0; i < shape.inner; i++) {
-			const s = 0.8 + rand() * 0.7;
+			const s = 0.72 + rand() * 0.38;
 			const blob = new THREE.IcosahedronGeometry(s, 1);
-			blob.translate((rand() - 0.5) * 1.5, cy - 0.5 + rand() * 0.8, (rand() - 0.5) * 1.5);
+			blob.scale(1.1, 0.70, 0.9);
+			blob.translate(shape.cx + (rand() - 0.5) * 1.3, cy - 0.35 + rand() * 0.65, shape.cz + (rand() - 0.5) * 1.3);
 			parts.push(this.paint(blob, greens[(rand() * greens.length) | 0], 0.24, rand, 0.35));
 		}
 
 		const geo = mergeGeometries(parts, false);
 		geo.computeBoundingSphere();
 		geo.userData.blobs = outerBlobs;
+		geo.userData.crown = shape;
 		return geo;
 	}
 
@@ -320,14 +344,14 @@ gl_Position = projectionMatrix * mvPosition;
 	// call. They never cast shadows.
 
 	collectLeafCards(list, rand, out, density = 1, hero = false) {
-		const { cy, ry } = this.crownShape(true);
+		const { cy, ry, cx, cz } = this.leafShape;
 		const blobs = this.leafBlobs;
 		// pick blobs by surface area, otherwise small blobs soak up cards while
 		// the big protrusions (the ones that read as bare masses) stay sparse
 		const cdf = [];
 		let cdfTotal = 0;
 		for (const b of blobs) {
-			cdfTotal += b.r * b.r;
+			cdfTotal += b.rx * b.ry + b.rx * b.rz + b.ry * b.rz;
 			cdf.push(cdfTotal);
 		}
 		const up = new THREE.Vector3(0, 1, 0);
@@ -342,15 +366,16 @@ gl_Position = projectionMatrix * mvPosition;
 		const qTilt = new THREE.Quaternion();
 		const qSpin = new THREE.Quaternion();
 		const palette = [
-			new THREE.Color(0x6b8f40),
-			new THREE.Color(0x769c49),
-			new THREE.Color(0x82a853),
-			new THREE.Color(0x8eb35d),
-			new THREE.Color(0x9bbd68),
+			new THREE.Color(0x718b55),
+			new THREE.Color(0x7c9660),
+			new THREE.Color(0x879e6c),
+			new THREE.Color(0x91a877),
+			new THREE.Color(0x9aae81),
 		];
 
 		for (const t of list) {
 			const scale = t.scale;
+			const firstCard = out.length;
 			// Roughly area-proportional density. A leafy crown needs many small
 			// clusters; one card covers only ~0.2 m² of a 50-70 m² canopy.
 			const count = Math.max(18, Math.round(600 * scale * scale * (0.82 + rand() * 0.36) * density));
@@ -371,9 +396,9 @@ gl_Position = projectionMatrix * mvPosition;
 					else lo = mid + 1;
 				}
 				const blob = blobs[lo];
-				let ox = blob.x;
+				let ox = blob.x - cx;
 				let oy = blob.y - cy;
-				let oz = blob.z;
+				let oz = blob.z - cz;
 				let inv = 1 / Math.max(0.001, Math.hypot(ox, oy, oz));
 				ox *= inv; oy *= inv; oz *= inv;
 
@@ -390,30 +415,36 @@ gl_Position = projectionMatrix * mvPosition;
 				inv = 1 / Math.max(0.001, Math.hypot(dx, dy, dz));
 				dx *= inv; dy *= inv; dz *= inv;
 
-				const rr = blob.r * (1.08 + rand() * 0.12);
-				let px = blob.x + dx * rr;
-				let py = blob.y + dy * rr * 0.9;
-				let pz = blob.z + dz * rr;
+				const rr = 1.07 + rand() * 0.035;
+				let px = blob.x + dx * blob.rx * rr;
+				let py = blob.y + dy * blob.ry * rr;
+				let pz = blob.z + dz * blob.rz * rr;
 				// small extra lift away from the crown centre clears the
 				// neighbouring blobs without making cards float
-				let qx = px;
+				let qx = px - cx;
 				let qy = py - cy;
-				let qz = pz;
+				let qz = pz - cz;
 				inv = 1 / Math.max(0.001, Math.hypot(qx, qy, qz));
-				const lift = 0.02 + rand() * 0.1;
+				const lift = 0.01 + rand() * 0.025;
 				px += qx * inv * lift;
 				py += qy * inv * lift;
 				pz += qz * inv * lift;
 				// no leaf clusters hanging in the clear trunk zone
-				if (py < 1.9 && Math.hypot(px, pz) < 0.95) py += 0.8;
+				if (py < 1.9 && Math.hypot(px, pz) < 0.95) continue;
+				// Hidden overlaps do not need cards. Reject them rather than
+				// pushing the cards away from their supporting clump.
+				if (blobs.some((b) => b !== blob &&
+					((px - b.x) / (b.rx * 1.04)) ** 2 +
+					((py - b.y) / (b.ry * 1.04)) ** 2 +
+					((pz - b.z) / (b.rz * 1.04)) ** 2 < 1)) continue;
 
-				const wx = t.x + (px * cosR + pz * sinR) * scale;
-				const wy = groundY + py * scale;
-				const wz = t.z + (-px * sinR + pz * cosR) * scale;
+				const wx = t.x + px * t.scaleX * cosR + pz * t.scaleZ * sinR;
+				const wy = groundY + py * t.scaleY;
+				const wz = t.z - px * t.scaleX * sinR + pz * t.scaleZ * cosR;
 
 				// random card orientation with an outward bias, so the crown
 				// reads as leaves from every angle instead of edge-on slivers
-				n.set(dx * 0.9 + ox * 0.45, dy * 0.9 + oy * 0.45, dz * 0.9 + oz * 0.45);
+				n.set(dx / (blob.rx * t.scaleX), dy / (blob.ry * t.scaleY), dz / (blob.rz * t.scaleZ));
 				n.normalize();
 				n.applyAxisAngle(up, t.rot);
 				n.x += (rand() - 0.5) * 0.68;
@@ -445,11 +476,18 @@ gl_Position = projectionMatrix * mvPosition;
 					variant: (rand() * 4) | 0,
 				});
 			}
+			// Normalize detail order per crown. A prefix of the final interleaved
+			// buffer then keeps the same fraction of leaves on EVERY tree.
+			const visibleCards = out.length - firstCard;
+			for (let i = firstCard; i < out.length; i++) {
+				out[i].detailRank = (i - firstCard + 0.5) / visibleCards;
+			}
 		}
 	}
 
 	buildLeafCards(cards) {
 		if (!cards.length) return null;
+		cards.sort((a, b) => a.detailRank - b.detailRank);
 		// single quad per card: 2 triangles instead of 8, and the leaf texture
 		// supplies all of the silhouette detail anyway
 		const geo = new THREE.PlaneGeometry(1, 1);
@@ -514,6 +552,8 @@ gl_Position = projectionMatrix * mvPosition;
 		mesh.receiveShadow = false;
 		mesh.frustumCulled = false;
 		mesh.name = 'leaf-cards';
+		mesh.userData.maxCount = cards.length;
+		mesh.userData.detailOrder = 'interleaved-per-crown';
 		this.group.add(mesh);
 		return mesh;
 	}
@@ -528,6 +568,7 @@ gl_Position = projectionMatrix * mvPosition;
 
 		const broadGeo = this.broadleafGeometry(41, true);
 		this.leafBlobs = broadGeo.userData.blobs;
+		this.leafShape = broadGeo.userData.crown;
 		const coniferGeo = this.coniferGeometry(77);
 		const shrubGeo = this.shrubGeometry(133);
 
@@ -601,9 +642,10 @@ gl_Position = projectionMatrix * mvPosition;
 			const p = new THREE.Vector3();
 			const c = new THREE.Color();
 			list.forEach((t, i) => {
+				this.setTreeProportions(t);
 				p.set(t.x, t.y - 0.06, t.z);
 				q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), t.rot);
-				s.set(t.scale, t.scale * (0.92 + (i % 7) * 0.025), t.scale);
+				s.set(t.scaleX, t.scaleY, t.scaleZ);
 				m.compose(p, q, s);
 				mesh.setMatrixAt(i, m);
 				c.setRGB(t.tint, t.tint * (0.97 + (i % 5) * 0.012), t.tint * 0.92);
@@ -614,6 +656,9 @@ gl_Position = projectionMatrix * mvPosition;
 			mesh.castShadow = castShadow;
 			mesh.receiveShadow = receiveShadow;
 			mesh.frustumCulled = false;
+			mesh.userData.maxCount = list.length;
+			mesh.userData.qualityEligible = true;
+			this.treeMeshes.push(mesh);
 			this.group.add(mesh);
 			return mesh;
 		};
@@ -663,11 +708,12 @@ gl_Position = projectionMatrix * mvPosition;
 			});
 		}
 		for (const t of heroTrees) {
+			this.setTreeProportions(t, true);
 			const geo = t.conifer ? coniferGeo : broadGeo;
 			const mesh = new THREE.Mesh(geo, treeMat);
 			mesh.position.set(t.x, this.hf.height(t.x, t.z) - 0.08, t.z);
 			mesh.rotation.y = t.rot;
-			mesh.scale.setScalar(t.scale);
+			mesh.scale.set(t.scaleX, t.scaleY, t.scaleZ);
 			mesh.castShadow = true;
 			mesh.receiveShadow = true;
 			this.group.add(mesh);
@@ -684,6 +730,25 @@ gl_Position = projectionMatrix * mvPosition;
 			cardRand, cards, 0.2
 		);
 		this.collectLeafCards(heroTrees.filter((t) => !t.conifer), cardRand, cards, 1.7, true);
-		this.buildLeafCards(cards);
+		this.leafCards = this.buildLeafCards(cards);
+		this.maxLeafCards = cards.length;
+		this.group.userData.foliage = {
+			factor: 1, leafCards: cards.length, maxLeafCards: cards.length,
+			treeInstances: nearTrees.length + farTrees.length, heroTrees: heroTrees.length,
+		};
+	}
+
+	setQuality(settings = {}) {
+		if (Number.isFinite(settings.foliage)) this.foliage = clamp(settings.foliage, 0, 1);
+		if (this.leafCards) this.leafCards.count = Math.round(this.maxLeafCards * this.foliage);
+		for (const mesh of this.treeMeshes) {
+			// Keep the near horizon spatially populated while reducing the expensive
+			// procedural crown instances on integrated GPUs. Hero meshes remain full.
+			mesh.count = Math.max(1, Math.round(mesh.userData.maxCount * this.foliage));
+		}
+		this.group.userData.foliage.factor = this.foliage;
+		this.group.userData.foliage.leafCards = this.leafCards?.count || 0;
+		this.group.userData.foliage.treeInstances = this.treeMeshes.reduce((sum, mesh) => sum + mesh.count, 0);
+		return this;
 	}
 }

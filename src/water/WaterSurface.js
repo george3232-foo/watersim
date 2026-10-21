@@ -5,15 +5,20 @@ const WATER_VERT = /* glsl */`
 precision highp float;
 uniform sampler2D tMacro;
 uniform sampler2D tMicro;
+uniform sampler2D tBed;
 uniform float uLevel;
+uniform float uDomain;
+uniform float uHalf;
 uniform mat4 uReflectionMatrix;
 varying vec3 vWorld;
 varying vec2 vSimUv;
 varying vec4 vReflect;
 varying float vViewDepth;
 void main(){
-  vSimUv = (position.xz + 10.0) / 20.0;
-  float eta = texture2D(tMacro, vSimUv).r + texture2D(tMicro, vSimUv).r + uLevel;
+  vSimUv = (position.xz + uHalf) / uDomain;
+  float macro = texture2D(tMacro, vSimUv).r;
+  float bed = texture2D(tBed, vSimUv).r;
+  float eta = (macro - bed > 0.0001 ? macro : 0.0) + texture2D(tMicro, vSimUv).r + uLevel;
   vec3 p = position;
   p.y = eta;
   vec4 wp = modelMatrix * vec4(p, 1.0);
@@ -41,6 +46,10 @@ uniform float uNear;
 uniform float uFar;
 uniform float uTime;
 uniform float uLevel;
+uniform float uDomain;
+uniform vec2 uMacroTexel;
+uniform vec2 uMicroTexel;
+uniform float uReflectionValid;
 uniform vec3 uSunDir;
 uniform vec3 uMoonDir;
 uniform vec3 uSunColor;
@@ -60,10 +69,6 @@ uniform float uDebug;
 ${GLSL_NOISE}
 ${GLSL_WATER_COMMON}
 
-float surf(vec2 uv){
-  return texture2D(tMacro, uv).r + texture2D(tMicro, uv).r + uLevel;
-}
-
 float capillary(vec2 p, vec2 wd){
   float t = uTime;
   float a = sw_noise(p * 10.5 + wd * t * 0.5) * 0.60;
@@ -78,7 +83,8 @@ void main(){
   float etaM = texture2D(tMacro, vSimUv).r;
   float etaR = texture2D(tMicro, vSimUv).r;
   float bed = texture2D(tBed, vSimUv).r;
-  float h = etaM + uLevel - bed;
+  float surface = (etaM - bed > 0.0001 ? etaM : 0.0) + uLevel;
+  float h = surface - bed;
 
   if (h < 0.0022) discard;
 
@@ -90,19 +96,19 @@ void main(){
   float dist = length(cameraPosition - vWorld);
 
   // ---- surface normal: macro + micro + sub-grid capillary detail ----
-  float eM = 1.6 / 256.0;
+  float eM = 1.6 * uMacroTexel.x;
   float hL = texture2D(tMacro, vSimUv - vec2(eM, 0.0)).r;
   float hR = texture2D(tMacro, vSimUv + vec2(eM, 0.0)).r;
   float hD = texture2D(tMacro, vSimUv - vec2(0.0, eM)).r;
   float hU = texture2D(tMacro, vSimUv + vec2(0.0, eM)).r;
-  vec2 gradM = vec2(hR - hL, hU - hD) / (2.0 * eM * 20.0);
+  vec2 gradM = vec2(hR - hL, hU - hD) / (2.0 * eM * uDomain);
 
-  float eR = 2.2 / 512.0;
+  float eR = 2.2 * uMicroTexel.x;
   float rL = texture2D(tMicro, vSimUv - vec2(eR, 0.0)).r;
   float rR = texture2D(tMicro, vSimUv + vec2(eR, 0.0)).r;
   float rD = texture2D(tMicro, vSimUv - vec2(0.0, eR)).r;
   float rU = texture2D(tMicro, vSimUv + vec2(0.0, eR)).r;
-  vec2 gradR = vec2(rR - rL, rU - rD) / (2.0 * eR * 20.0);
+  vec2 gradR = vec2(rR - rL, rU - rD) / (2.0 * eR * uDomain);
 
   vec2 wd = normalize(uWind + vec2(1e-4, 0.0));
   vec2 cp = vWorld.xz;
@@ -125,6 +131,8 @@ void main(){
   float thick = clamp(h, 0.0, 2.2);
   float shoreFade = smoothstep(0.02, 0.42, h);
   vec2 refr = N.xz * (0.010 + thick * 0.034) * uRefraction * shoreFade;
+  // Keep near-surface silhouettes readable without clearing the deeper water.
+  refr *= mix(0.65, 1.0, smoothstep(0.06, 0.6, max(0.0, sceneZ - vViewDepth)));
   vec2 refrUv = clamp(screenUv + refr, vec2(0.001), vec2(0.999));
   float offDepth = texture2D(tDepth, refrUv).r;
   float offZ = sw_linearDepth(offDepth, uNear, uFar);
@@ -134,7 +142,7 @@ void main(){
     offZ = sw_linearDepth(offDepth, uNear, uFar);
   }
 
-  vec2 ca = refr * 0.045;
+  vec2 ca = refr * 0.018;
   vec3 refrCol;
   refrCol.r = texture2D(tScene, clamp(refrUv - ca, vec2(0.001), vec2(0.999))).r;
   refrCol.g = texture2D(tScene, refrUv).g;
@@ -144,21 +152,22 @@ void main(){
   // the eye from a fish just below the surface has crossed far less water than
   // the bed. Use the opaque scene depth to trace the actual submerged path.
   float path = clamp(offZ - vViewDepth, 0.025, 3.4);
+  float shortPath = 1.0 - smoothstep(0.12, 0.7, path);
   // peaty garden-pond water: reds die first, blue-greens carry
   vec3 sigma = vec3(1.02, 0.46, 0.34);
-  vec3 trans = exp(-sigma * path);
+  vec3 trans = exp(-sigma * path * (1.0 - shortPath * 0.18));
   vec3 scatter = uScatterColor * (0.32 + 0.22 * max(uSunDir.y, 0.0));
   scatter += uDeepColor * 0.5;
   vec3 refracted = refrCol * trans + scatter * (1.0 - trans);
 
   // ---- planar reflection ----
-  vec2 ruv = vReflect.xy / vReflect.w;
+  vec2 ruv = vReflect.xy / max(vReflect.w, 0.0001);
   vec2 rOff = N.xz * (0.006 + 0.026 * slope);
   vec2 ruvA = ruv + rOff;
   vec2 ruvB = ruv + rOff * 0.45 + vec2(0.0008, 0.0005);
   vec2 ruvC = ruv + rOff * 1.55 - vec2(0.0007, 0.0009);
   vec3 reflCol;
-  float inside = step(0.002, ruvA.x) * step(ruvA.x, 0.998) * step(0.002, ruvA.y) * step(ruvA.y, 0.998);
+  float inside = uReflectionValid * step(0.0001, vReflect.w) * step(0.002, ruvA.x) * step(ruvA.x, 0.998) * step(0.002, ruvA.y) * step(ruvA.y, 0.998);
   vec3 rA = texture2D(tReflection, clamp(ruvA, vec2(0.001), vec2(0.999))).rgb;
   vec3 rB = texture2D(tReflection, clamp(ruvB, vec2(0.001), vec2(0.999))).rgb;
   vec3 rC = texture2D(tReflection, clamp(ruvC, vec2(0.001), vec2(0.999))).rgb;
@@ -168,6 +177,7 @@ void main(){
   reflCol = mix(skyRefl, reflCol, inside);
 
   float fres = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+  fres *= 1.0 - shortPath * smoothstep(0.2, 0.75, ndv) * 0.12;
   vec3 color = mix(refracted, reflCol, fres);
 
   // ---- sun & moon specular ----
@@ -241,8 +251,8 @@ void main(){
     else if (uDebug < 7.5) color = N * 0.5 + 0.5;
     else if (uDebug < 8.5) color = vec3(ndv);
     else if (uDebug < 9.5) color = vec3(path / 3.4);
-    else if (uDebug < 10.5) color = vec3(offZ / 20.0);
-    else if (uDebug < 11.5) color = vec3(vViewDepth / 20.0);
+    else if (uDebug < 10.5) color = vec3(offZ / uDomain);
+    else if (uDebug < 11.5) color = vec3(vViewDepth / uDomain);
     else if (uDebug < 12.5) color = vec3(texture2D(tDepth, screenUv).r);
     else if (uDebug < 13.5) color = vec3(offDepth);
     else color = vec3(h * 0.5);
@@ -256,8 +266,9 @@ export class WaterSurface {
 		this.engine = engine;
 		this.sim = sim;
 		this.hf = heightField;
-		this.res = opts.res || 256;
-		this.half = 10;
+		this.res = opts.res ?? 256;
+		this.domain = sim.domain ?? 20;
+		this.half = this.domain * 0.5;
 		this.geometry = this.buildGeometry(this.res);
 		this.uniforms = {
 			tMacro: { value: sim.macroTexture },
@@ -268,6 +279,10 @@ export class WaterSurface {
 			tReflection: { value: null },
 			uReflectionMatrix: { value: engine.textureMatrix },
 			uLevel: { value: 0 },
+			uDomain: { value: this.domain }, uHalf: { value: this.half },
+			uMacroTexel: { value: new THREE.Vector2(1 / sim.macroSize, 1 / sim.macroSize) },
+			uMicroTexel: { value: new THREE.Vector2(1 / sim.microSize, 1 / sim.microSize) },
+			uReflectionValid: { value: 0 },
 			uResolution: { value: new THREE.Vector2(1, 1) },
 			uNear: { value: engine.camera.near },
 			uFar: { value: engine.camera.far },
@@ -301,16 +316,22 @@ export class WaterSurface {
 		});
 		this.mesh = new THREE.Mesh(this.geometry, this.material);
 		this.mesh.frustumCulled = false;
+		this.mesh.onBeforeRender = () => {
+			// Reflection may have been refreshed after update() earlier this frame.
+			this.uniforms.uReflectionValid.value = this.engine.reflectionValid ? 1 : 0;
+		};
 		this.mesh.renderOrder = 10;
 		this.scene = new THREE.Scene();
 		this.scene.add(this.mesh);
 	}
 
 	buildGeometry(n) {
-		const half = this.half || 10;
+		if (!Number.isInteger(n) || n < 2 || n > 2048) throw new RangeError('Water surface resolution must be an integer from 2 to 2048');
+		const half = this.half;
 		const positions = new Float32Array((n + 1) * (n + 1) * 3);
 		const uvs = new Float32Array((n + 1) * (n + 1) * 2);
-		const indices = [];
+		const IndexArray = (n + 1) ** 2 > 65535 ? Uint32Array : Uint16Array;
+		const indices = new IndexArray(n * n * 6);
 		let p = 0, q = 0;
 		for (let j = 0; j <= n; j++) {
 			const z = -half + (j / n) * half * 2;
@@ -320,21 +341,34 @@ export class WaterSurface {
 				uvs[q++] = (x + half) / (half * 2); uvs[q++] = (z + half) / (half * 2);
 			}
 		}
+		let k = 0;
 		for (let j = 0; j < n; j++) {
 			for (let i = 0; i < n; i++) {
 				const a = j * (n + 1) + i;
 				const b = a + 1;
 				const c = a + (n + 1);
 				const d = c + 1;
-				indices.push(a, c, b, b, c, d);
+				indices[k++] = a; indices[k++] = c; indices[k++] = b;
+				indices[k++] = b; indices[k++] = c; indices[k++] = d;
 			}
 		}
 		const geo = new THREE.BufferGeometry();
 		geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 		geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-		geo.setIndex(indices);
+		geo.setIndex(new THREE.BufferAttribute(indices, 1));
 		geo.computeBoundingSphere();
 		return geo;
+	}
+
+	setResolution(n) {
+		if (n === this.res) return false;
+		const geometry = this.buildGeometry(n);
+		const previous = this.geometry;
+		this.geometry = geometry;
+		this.mesh.geometry = geometry;
+		this.res = n;
+		previous.dispose();
+		return true;
 	}
 
 	update(time, state) {
@@ -348,12 +382,17 @@ export class WaterSurface {
 		u.tReflection.value = engine.reflectionRT.texture;
 		u.uReflectionMatrix.value = engine.textureMatrix;
 		u.uLevel.value = this.sim.levelOffset;
+		u.uDomain.value = this.sim.domain;
+		u.uHalf.value = this.sim.half;
+		u.uMacroTexel.value.setScalar(1 / this.sim.macroSize);
+		u.uMicroTexel.value.setScalar(1 / this.sim.microSize);
+		u.uReflectionValid.value = engine.reflectionValid ? 1 : 0;
 		u.uResolution.value.set(engine.sceneRT.width, engine.sceneRT.height);
 		u.uNear.value = engine.camera.near;
 		u.uFar.value = engine.camera.far;
 		u.uTime.value = time;
 		u.uSunDir.value.copy(state.sunDir);
-		u.uMoonDir.value.copy(state.moonDir || new THREE.Vector3(0.4, 0.6, -0.4));
+		if (state.moonDir) u.uMoonDir.value.copy(state.moonDir);
 		u.uSunColor.value.copy(state.sunColor);
 		u.uSkyColor.value.copy(state.skyColor);
 		u.uHorizonColor.value.copy(state.horizonColor);
@@ -361,10 +400,16 @@ export class WaterSurface {
 		u.uDeepColor.value.copy(state.deepColor);
 		u.uFogColor.value.copy(state.fogColor);
 		u.uSunIntensity.value = state.sunIntensity;
-		u.uFogDensity.value = state.fogDensity || 0.012;
+		u.uFogDensity.value = state.fogDensity ?? 0.012;
 		u.uWindStrength.value = this.sim.windStrength;
 		u.uWind.value.copy(this.sim.wind);
 		u.uRain.value = this.sim.rain;
 		u.uNight.value = state.night;
+	}
+
+	dispose() {
+		this.mesh.removeFromParent();
+		this.geometry.dispose();
+		this.material.dispose();
 	}
 }

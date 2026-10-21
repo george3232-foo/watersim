@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mulberry32, clamp, lerp, TAU } from '../core/Noise.js';
 import { GLSL_NOISE } from '../core/Shaders.js';
+import { waterColumn } from './WaterCoupling.js';
 
 // Procedural fish: one instanced geometry per species. The body undulates in
 // the vertex shader with a travelling wave; the brain (boids + state machine)
@@ -260,6 +261,13 @@ export class Fish {
 		this._steer = new THREE.Vector3();
 		this._toTarget = new THREE.Vector3();
 		this._dir = new THREE.Vector3();
+		this._surface = { height: 0, depth: 0, bed: 0 };
+		this._probeSurface = { height: 0, depth: 0, bed: 0 };
+		this._matrix = new THREE.Matrix4();
+		this._quaternion = new THREE.Quaternion();
+		this._euler = new THREE.Euler();
+		this._scale = new THREE.Vector3();
+		this._color = new THREE.Color();
 
 		this.makeSpecies('koi', {
 			count: opts.koi ?? 6,
@@ -331,10 +339,12 @@ export class Fish {
 			const r = Math.sqrt(rand()) * (R - 0.8);
 			const x = Math.cos(a) * r;
 			const z = Math.sin(a) * r;
-			const d = -this.hf.height(x, z);
-			if (d > depthMin && d < depthMax) return { x, z, d };
+			const surf = waterColumn(this.hf, this.sim, x, z, this._surface);
+			const d = surf.depth;
+			if (d > depthMin && d < depthMax) return { x, z, d, height: surf.height };
 		}
-		return { x: 0, z: 0, d: 0.6 };
+		const surf = waterColumn(this.hf, this.sim, 0, 0, this._surface);
+		return { x: 0, z: 0, d: surf.depth, height: surf.height };
 	}
 
 	spawnOne(species) {
@@ -347,7 +357,7 @@ export class Fish {
 		const speed = lerp(cfg.speed[0], cfg.speed[1], rand() * 0.6);
 		const f = {
 			species,
-			pos: new THREE.Vector3(spawn.x, -spawn.d + 0.1, spawn.z),
+			pos: new THREE.Vector3(spawn.x, spawn.height - spawn.d * 0.8, spawn.z),
 			vel: new THREE.Vector3(Math.sin(heading) * speed, 0, Math.cos(heading) * speed),
 			len,
 			seed: rand(),
@@ -371,17 +381,23 @@ export class Fish {
 	// Player interactions: startle fish near an impact, or drop food they will
 	// come up to inspect.
 	startle(x, z, strength = 1) {
-		this.events.push({ type: 'startle', x, z, strength, t: performance.now() / 1000 });
+		if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+		if (this.events.length >= 64) this.events.shift();
+		this.events.push({ type: 'startle', x, z, strength: Number.isFinite(strength) ? clamp(strength, 0, 4) : 1, t: performance.now() / 1000 });
 	}
 	feed(x, z) {
+		if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+		if (this.events.length >= 64) this.events.shift();
 		this.events.push({ type: 'feed', x, z, strength: 1, t: performance.now() / 1000 });
 	}
 	// A koi close enough to the surface snaps a morsel up.
 	nibbleAt(x, z) {
+		if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
 		for (const f of this.fish) {
 			if (f.species.name !== 'koi') continue;
 			const d = Math.hypot(f.pos.x - x, f.pos.z - z);
-			if (d < 0.34 && f.pos.y > -0.24) {
+			const surf = waterColumn(this.hf, this.sim, f.pos.x, f.pos.z, this._surface);
+			if (d < 0.34 && surf.depth > 0.12 && f.pos.y > surf.height - 0.24 && f.pos.y <= surf.height + 0.02) {
 				f.state = 'feed';
 				f.stateT = 1.0 + this.rand() * 1.4;
 				f.target.set(x, 0, z);
@@ -421,8 +437,10 @@ export class Fish {
 	}
 
 	update(dt, time) {
+		if (!Number.isFinite(dt) || dt <= 0) return;
+		dt = Math.min(dt, 0.1);
+		time = Number.isFinite(time) ? time : this.timeUniform.value + dt;
 		this.timeUniform.value = time;
-		if (dt <= 0) return;
 		this.drainEvents();
 
 		const hf = this.hf;
@@ -492,9 +510,9 @@ export class Fish {
 			// shoreline avoidance: probe ahead and push inward
 			const probeX = f.pos.x + dir.x * (0.6 + f.len * 1.5);
 			const probeZ = f.pos.z + dir.z * (0.6 + f.len * 1.5);
-			const depthAhead = -hf.height(probeX, probeZ);
+			const depthAhead = waterColumn(hf, sim, probeX, probeZ, this._probeSurface).depth;
 			if (depthAhead < 0.16) {
-				const inward = 1.0 / (Math.max(f.pos.x, 0.001) ** 2 + f.pos.z ** 2 + 1e-6);
+				const inward = 1.0 / (f.pos.x ** 2 + f.pos.z ** 2 + 1e-6);
 				const push = (0.16 - depthAhead) * 9 + 1.2;
 				steer.x -= f.pos.x * inward ** 0.5 * push * 0.5;
 				steer.z -= f.pos.z * inward ** 0.5 * push * 0.5;
@@ -520,19 +538,29 @@ export class Fish {
 			if (sp > maxSp) { f.vel.x *= maxSp / sp; f.vel.z *= maxSp / sp; }
 			if (sp < 0.02 && f.state !== 'dart') { f.vel.x += Math.sin(f.seed * 10 + time) * 0.02; f.vel.z += Math.cos(f.seed * 10 + time) * 0.02; }
 
+			const prevX = f.pos.x, prevZ = f.pos.z;
 			f.pos.x += f.vel.x * dt;
 			f.pos.z += f.vel.z * dt;
+			const surf = waterColumn(hf, sim, f.pos.x, f.pos.z, this._surface);
+			if (surf.depth < 0.15) {
+				// Don't integrate into a bank while shoreline steering catches up.
+				f.pos.x = prevX; f.pos.z = prevZ;
+				f.vel.x *= 0.5; f.vel.z *= 0.5;
+				waterColumn(hf, sim, f.pos.x, f.pos.z, surf);
+			}
 
 			// vertical: spring toward desired depth, but respect the bed
-			const depthHere = -hf.height(f.pos.x, f.pos.z);
-			const maxY = -0.05;
-			const minY = Math.max(-depthHere + 0.10, -1.2);
-			let desY = -f.desiredDepth;
-			if (f.state === 'feed') desY = -0.07;
+			const maxY = surf.height - Math.min(0.05, surf.depth * 0.4);
+			const minY = Math.min(maxY, Math.max(surf.bed + Math.min(0.10, surf.depth * 0.6), surf.height - 1.2));
+			if (!Number.isFinite(f.desiredDepth)) f.desiredDepth = cfg.depth[0];
+			let desY = surf.height - f.desiredDepth;
+			if (f.state === 'feed') desY = surf.height - 0.07;
 			desY = clamp(desY, minY, maxY);
 			f.vel.y += (desY - f.pos.y) * 2.4 * dt;
 			f.vel.y *= Math.exp(-3.2 * dt);
 			f.pos.y += f.vel.y * dt;
+			if (f.pos.y < minY) { f.pos.y = minY; f.vel.y = Math.max(0, f.vel.y); }
+			if (f.pos.y > maxY) { f.pos.y = maxY; f.vel.y = Math.min(0, f.vel.y); }
 
 			// ---- orientation ----
 			const spd3 = f.vel.length() || 0.001;
@@ -551,7 +579,7 @@ export class Fish {
 			f.osc = lerp(f.osc, 0.3 + spNorm * 0.75, Math.min(1, dt * 3));
 
 			// ---- ripples when close to the surface ----
-			if (f.pos.y > -0.16) {
+			if (surf.depth > 0.02 && f.pos.y > surf.height - 0.16) {
 				f.rippleT -= dt;
 				if (f.rippleT <= 0) {
 					f.rippleT = f.species.name === 'koi' ? 0.28 + rand() * 0.5 : 0.5 + rand() * 0.8;
@@ -567,19 +595,17 @@ export class Fish {
 		}
 
 		// ---- write instance matrices / colours ----
-		const m = new THREE.Matrix4();
-		const q = new THREE.Quaternion();
-		const e = new THREE.Euler();
-		const sc = new THREE.Vector3();
-		const p = new THREE.Vector3();
-		const c = new THREE.Color();
+		const m = this._matrix;
+		const q = this._quaternion;
+		const e = this._euler;
+		const sc = this._scale;
+		const c = this._color;
 		for (const species of this.species) {
 			species.list.forEach((f, i) => {
-				p.copy(f.pos);
 				e.set(f.pitch, f.yaw, f.roll, 'YXZ');
 				q.setFromEuler(e);
 				sc.set(f.len, f.len * f.lenScaleY, f.len);
-				m.compose(p, q, sc);
+				m.compose(f.pos, q, sc);
 				species.mesh.setMatrixAt(i, m);
 				// (seed, tail speed, species type) packed in the instance colour
 				c.setRGB(f.seed, clamp(f.osc * 0.5, 0, 1), species.name === 'koi' ? 0.2 : 0.8);

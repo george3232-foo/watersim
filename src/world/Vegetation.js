@@ -53,15 +53,35 @@ function paintFlat(geo, hex, variation, rand) {
 	return geo;
 }
 
+// Mix seeded samples from 16 shore sectors and two radial bands once. Every
+// quality prefix covers the bank instead of keeping a contiguous patch of it.
+function spreadGroundDetail(items) {
+	const cells = Array.from({ length: 32 }, () => []);
+	for (const item of items) {
+		const angle = (Math.atan2(item.z, item.x) + TAU) % TAU;
+		const sector = Math.min(15, Math.floor(angle / TAU * 16));
+		cells[sector * 2 + (Math.hypot(item.x, item.z) >= 12 ? 1 : 0)].push(item);
+	}
+	for (const cell of cells) {
+		cell.forEach((item, i) => { item.detailRank = (i + 0.5) / cell.length; });
+	}
+	items.sort((a, b) => a.detailRank - b.detailRank);
+}
+
 export class Vegetation {
 	constructor(heightField) {
 		this.hf = heightField;
 		this.group = new THREE.Group();
 		this.group.name = 'vegetation';
+		this.foliage = 1;
 		this.uniforms = { uTime: { value: 0 }, uWindPower: { value: 0.4 } };
 		this.buildGrass();
 		this.buildReeds();
 		this.buildFlowers();
+		this.group.userData.foliage = {
+			factor: 1, grass: this.grass.count, maxGrass: this.grass.count,
+			flowers: this.flowers.count, maxFlowers: this.flowers.count, reeds: this.reeds.count,
+		};
 	}
 
 	windMaterial(opts = {}) {
@@ -146,6 +166,7 @@ export class Vegetation {
 			const scale = 0.62 + rand() * 0.65 + smoothstep(9, 16.4, r) * 0.3;
 			items.push({ x, y, z, scale, rot: rand() * TAU, tint: 0.72 + rand() * 0.55 });
 		}
+		spreadGroundDetail(items);
 		const mesh = new THREE.InstancedMesh(geo, mat, items.length);
 		const m = new THREE.Matrix4();
 		const q = new THREE.Quaternion();
@@ -166,6 +187,8 @@ export class Vegetation {
 		if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 		mesh.frustumCulled = false;
 		mesh.name = 'grass';
+		mesh.userData.maxCount = items.length;
+		mesh.userData.detailOrder = 'interleaved-spatial-cells';
 		this.grass = mesh;
 		this.group.add(mesh);
 	}
@@ -242,6 +265,8 @@ export class Vegetation {
 		if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 		mesh.frustumCulled = false;
 		mesh.name = 'reeds';
+		mesh.userData.maxCount = items.length;
+		mesh.userData.preserveStructure = true;
 		this.reeds = mesh;
 		this.group.add(mesh);
 	}
@@ -278,6 +303,7 @@ export class Vegetation {
 			if (y < 0.06) continue;
 			items.push({ x, y, z, scale: 0.55 + rand2() * 0.55, rot: rand2() * TAU, tint: 0.8 + rand2() * 0.4 });
 		}
+		spreadGroundDetail(items);
 		const mesh = new THREE.InstancedMesh(geo, mat, items.length);
 		const m = new THREE.Matrix4();
 		const q = new THREE.Quaternion();
@@ -293,8 +319,22 @@ export class Vegetation {
 		mesh.instanceMatrix.needsUpdate = true;
 		mesh.frustumCulled = false;
 		mesh.name = 'flowers';
+		mesh.userData.maxCount = items.length;
+		mesh.userData.detailOrder = 'interleaved-spatial-cells';
 		this.flowers = mesh;
 		this.group.add(mesh);
+	}
+
+	setQuality(settings = {}) {
+		if (Number.isFinite(settings.foliage)) this.foliage = clamp(settings.foliage, 0, 1);
+		for (const mesh of [this.grass, this.flowers]) {
+			mesh.count = Math.round(mesh.userData.maxCount * this.foliage);
+		}
+		const counts = this.group.userData.foliage;
+		counts.factor = this.foliage;
+		counts.grass = this.grass.count;
+		counts.flowers = this.flowers.count;
+		return this;
 	}
 
 	update(dt, time) {
