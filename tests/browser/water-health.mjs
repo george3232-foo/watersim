@@ -10,7 +10,9 @@ export async function assertWaterHealth(page, steps = 120) {
 		const waitForReadback = async () => {
 			const started = performance.now();
 			while (sim.reading) {
-				if (performance.now() - started > 30000) throw new Error('Water-health readback did not finish');
+				// Software GPUs (SwiftShader in CI) can queue the whole 120-step run
+			// ahead of the fence, so the flush may take well over 30 seconds.
+			if (performance.now() - started > 120000) throw new Error('Water-health readback did not finish');
 				await new Promise((resolve) => setTimeout(resolve, 5));
 			}
 		};

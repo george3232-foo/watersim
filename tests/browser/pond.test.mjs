@@ -32,7 +32,7 @@ test('charge/release/cancel, feed/stir, public actions, and live quality switchi
 	});
 });
 
-test('short unforced water run stays finite with sensible mass drift', { timeout: 240000 }, async () => {
+test('short unforced water run stays finite with sensible mass drift', { timeout: 360000 }, async () => {
 	await withBrowserSession('water-health', async (session) => {
 		await assertStartup(session);
 		await session.report('water-health.json', await assertWaterHealth(session.page));
