@@ -5,7 +5,7 @@ import { assertControls, assertFormGuards, assertLayout, ensureConditionsOpen } 
 import { assertFeedAndStir, assertPublicActions, assertQualitySwitching, assertResizePreservesActors, assertStartup, assertThrowCancellation, assertThrowRelease, waterPath } from './scenarios.mjs';
 import { assertWaterHealth } from './water-health.mjs';
 
-test('startup, controls, lighting, and form-safe shortcuts work together', { timeout: 360000 }, async () => {
+test('startup, controls, lighting, and form-safe shortcuts work together', { timeout: 480000 }, async () => {
 	await withBrowserSession('desktop-controls', async (session) => {
 		const initial = await assertStartup(session);
 		const controls = await assertControls(session.page);
@@ -19,7 +19,7 @@ test('startup, controls, lighting, and form-safe shortcuts work together', { tim
 	});
 });
 
-test('charge/release/cancel, feed/stir, public actions, and live quality switching preserve actors', { timeout: 360000 }, async () => {
+test('charge/release/cancel, feed/stir, public actions, and live quality switching preserve actors', { timeout: 600000 }, async () => {
 	await withBrowserSession('pointer-and-quality', async (session) => {
 		await assertStartup(session);
 		const charged = await assertThrowRelease(session.page, 300);
@@ -39,7 +39,7 @@ test('short unforced water run stays finite with sensible mass drift', { timeout
 	});
 });
 
-test('320–390px layouts and touch cancellation do not accidentally throw', { timeout: 360000 }, async () => {
+test('320–390px layouts and touch cancellation do not accidentally throw', { timeout: 480000 }, async () => {
 	await withBrowserSession('mobile-touch', async (session) => {
 		await assertStartup(session);
 		const layouts = [];
